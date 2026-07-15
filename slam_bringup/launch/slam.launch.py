@@ -33,10 +33,20 @@ def generate_launch_description():
         default_value="false",
         description="Use simulation clock when true.",
     )
-    declare_robot_config = DeclareLaunchArgument(
-        "robot_config",
-        default_value="",
-        description="Robot selection config YAML. Reserved for shared bringup compatibility.",
+    declare_type = DeclareLaunchArgument(
+        "type",
+        default_value="apart",
+        description="Autonomy system type. Reserved for shared bringup compatibility.",
+    )
+    declare_robot_model = DeclareLaunchArgument(
+        "robot_model",
+        default_value="rover",
+        description="Robot model name. Reserved for shared bringup compatibility.",
+    )
+    declare_mode = DeclareLaunchArgument(
+        "mode",
+        default_value="SLAM",
+        description="Autonomy mode. Reserved for shared bringup compatibility.",
     )
     declare_autostart = DeclareLaunchArgument(
         "autostart",
@@ -104,7 +114,9 @@ def generate_launch_description():
     return LaunchDescription(
         [
             declare_use_sim_time,
-            declare_robot_config,
+            declare_robot_model,
+            declare_type,
+            declare_mode,
             declare_autostart,
             declare_use_lifecycle_manager,
             declare_params_file,
