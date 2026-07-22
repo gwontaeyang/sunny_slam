@@ -1,0 +1,118 @@
+contract: gole_dual_mid360_3d_slam_topics_v0
+
+frames:
+  map: map
+  odom: odom
+  base: base_link
+  imu: imu_link
+  front_lidar: mid360_front_link
+  rear_lidar: mid360_rear_link
+
+existing_inputs:
+  wheel_odom:
+    topic: /motor_driver_node/odom
+    type: nav_msgs/msg/Odometry
+    current_owner: gole_core/device/driver/motor_driver
+    notes: Published as motor_driver_node relative topic ~/odom. Used as velocity/planar prior.
+  external_imu:
+    topic: /imu/data
+    type: sensor_msgs/msg/Imu
+    current_owner: microstrain_or_external_imu_driver
+    notes: Primary gravity/angular-rate source for deskew and LIO propagation.
+
+mid360_raw_inputs:
+  front_custom:
+    topic: /slam_3d/input/mid360_front/livox
+    preferred_type: livox_ros_driver2/msg/CustomMsg
+    required_fields:
+      - per_point_offset_time
+      - x
+      - y
+      - z
+      - reflectivity_or_intensity
+      - line_or_tag_when_available
+    frame_id: mid360_front_link
+  rear_custom:
+    topic: /slam_3d/input/mid360_rear/livox
+    preferred_type: livox_ros_driver2/msg/CustomMsg
+    required_fields:
+      - per_point_offset_time
+      - x
+      - y
+      - z
+      - reflectivity_or_intensity
+      - line_or_tag_when_available
+    frame_id: mid360_rear_link
+  front_points_debug:
+    topic: /slam_3d/input/mid360_front/points_debug
+    type: sensor_msgs/msg/PointCloud2
+    use: visualization_and_recording_only
+  rear_points_debug:
+    topic: /slam_3d/input/mid360_rear/points_debug
+    type: sensor_msgs/msg/PointCloud2
+    use: visualization_and_recording_only
+
+internal_topics:
+  reference_wheel_imu_odom:
+    topic: /slam_3d/reference/wheel_imu_odom
+    type: nav_msgs/msg/Odometry
+    owner: robot_localization_optional_reference_ekf
+    publishes_tf: false
+  deskewed_front_points:
+    topic: /slam_3d/deskewed/mid360_front
+    type: sensor_msgs/msg/PointCloud2
+    use: debug_after_raw_lio_fields_have_been_consumed
+  deskewed_rear_points:
+    topic: /slam_3d/deskewed/mid360_rear
+    type: sensor_msgs/msg/PointCloud2
+    use: debug_after_raw_lio_fields_have_been_consumed
+  frontend_odom:
+    topic: /slam_3d/frontend/odom
+    type: nav_msgs/msg/Odometry
+    owner: future_gole_lio_frontend
+  frontend_path:
+    topic: /slam_3d/frontend/path
+    type: nav_msgs/msg/Path
+    owner: future_gole_lio_frontend
+  backend_odom:
+    topic: /slam_3d/backend/odom
+    type: nav_msgs/msg/Odometry
+    owner: future_gole_pose_graph_backend
+  backend_path:
+    topic: /slam_3d/backend/path
+    type: nav_msgs/msg/Path
+    owner: future_gole_pose_graph_backend
+  pose_graph:
+    topic: /slam_3d/backend/pose_graph
+    type: visualization_or_custom_message
+    owner: future_gole_pose_graph_backend
+  active_submap:
+    topic: /slam_3d/map/active_submap
+    type: sensor_msgs/msg/PointCloud2
+    owner: future_gole_submap_manager
+  global_map:
+    topic: /slam_3d/map/global_cloud
+    type: sensor_msgs/msg/PointCloud2
+    owner: future_gole_map_store
+  health:
+    topic: /slam_3d/health
+    type: diagnostics_or_custom_summary
+    owner: each_slam_module
+
+downstream_bridge_topics:
+  nav2_odom:
+    topic: /odom
+    rule: publish_only_when_2d_navigation_stack_is_intentionally_using_3d_slam_pose
+  nav2_tf:
+    frames:
+      - map_to_odom
+      - odom_to_base_link
+    rule: exactly_one_localization_or_slam_stack_may_publish_these_transforms
+
+rules:
+  - Raw Livox CustomMsg data is the LIO input contract.
+  - PointCloud2 debug topics are not allowed to replace raw Livox input for LIO.
+  - Do not run lidar_preprocessing or PointXYZ-only conversion before deskew/LIO.
+  - Do not concatenate front/rear PointCloud2 as the primary LIO measurement.
+  - The frontend must keep source sensor id, extrinsic, timestamp, and covariance per point batch.
+  - The backend owns map->odom only in mapping/localization modes where AMCL and the existing localization node are disabled.

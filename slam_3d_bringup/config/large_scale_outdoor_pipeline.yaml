@@ -1,0 +1,224 @@
+profile: gole_dual_mid360_large_scale_outdoor_v0
+
+purpose:
+  environment: large_scale_outdoor
+  sensors:
+    lidar: dual_livox_mid360
+    wheel_odom: existing_motor_driver_odom
+    imu: existing_external_imu
+  goal: build_internal_lidar_inertial_slam_pipeline
+
+frames:
+  global_frame: map
+  continuous_frame: odom
+  base_frame: base_link
+  front_lidar_frame: mid360_front_link
+  rear_lidar_frame: mid360_rear_link
+  imu_frame: imu_link
+
+raw_inputs:
+  front_livox_custom: /slam_3d/input/mid360_front/livox
+  rear_livox_custom: /slam_3d/input/mid360_rear/livox
+  front_points_debug: /slam_3d/input/mid360_front/points_debug
+  rear_points_debug: /slam_3d/input/mid360_rear/points_debug
+  wheel_odom: /motor_driver_node/odom
+  imu: /imu/data
+  tf: /tf
+  tf_static: /tf_static
+
+output_contract:
+  reference_wheel_imu_odom: /slam_3d/reference/wheel_imu_odom
+  frontend_odom: /slam_3d/frontend/odom
+  frontend_path: /slam_3d/frontend/path
+  frontend_keyframes: /slam_3d/frontend/keyframes
+  frontend_local_map: /slam_3d/frontend/local_map
+  backend_odom: /slam_3d/backend/odom
+  backend_path: /slam_3d/backend/path
+  backend_pose_graph: /slam_3d/backend/pose_graph
+  backend_loop_markers: /slam_3d/backend/loop_markers
+  active_submap_cloud: /slam_3d/map/active_submap
+  local_submap_cloud: /slam_3d/map/local_submaps
+  global_map_cloud: /slam_3d/map/global_cloud
+  health: /slam_3d/health
+
+tf_ownership:
+  architecture_only: publish_no_slam_tf
+  mapping_mode:
+    owner: slam_3d_backend
+    publishes:
+      - map_to_odom
+      - odom_to_base_link
+    requires_disabled:
+      - gole_localization/odom_estimation/odom_estimation_node_tf
+      - nav2_amcl_tf
+  navigation_compatibility:
+    odom_topic_for_nav2: /odom
+    rule: bridge_backend_odom_to_nav_only_after_2d_nav_integration_review
+
+calibration_and_time:
+  required_extrinsics:
+    - base_link_to_mid360_front_link
+    - base_link_to_mid360_rear_link
+    - base_link_to_imu_link
+    - mid360_front_link_to_mid360_rear_link
+  required_time_offsets:
+    - front_lidar_to_imu
+    - rear_lidar_to_imu
+    - wheel_odom_to_imu
+  synchronization_policy:
+    preferred: hardware_time_sync
+    mid360_capability_to_verify:
+      - ptp_or_gps_time
+      - per_point_timestamp
+      - packet_drop_counter
+    rejection_thresholds:
+      lidar_header_skew_ms: 5.0
+      imu_gap_ms: 20.0
+      wheel_odom_gap_ms: 100.0
+
+sensor_ingest:
+  rule: preserve_livox_custom_fields_until_after_deskew
+  forbidden_before_lio:
+    - PointXYZ_only_conversion
+    - lidar_preprocessing_node
+    - 2d_laserscan_projection
+    - naive_front_rear_pointcloud_concatenation
+  debug_outputs_may_use_pointxyz: true
+
+learning_prototype:
+  package: slam_3d_core
+  executable: scan_to_map_icp_node
+  launch_argument: run_learning_slam_core
+  default_enabled: false
+  role: editable_first_stage_scan_to_map_frontend
+  consumes_debug_pointcloud2:
+    - /slam_3d/input/mid360_front/points_debug
+    - /slam_3d/input/mid360_rear/points_debug
+  consumes_existing_priors:
+    wheel_odom: /motor_driver_node/odom
+    imu: /imu/data
+  publishes:
+    odom: /slam_3d/frontend/odom
+    path: /slam_3d/frontend/path
+    active_submap: /slam_3d/map/active_submap
+    global_cloud: /slam_3d/map/global_cloud
+    health: /slam_3d/health
+  tf_default: disabled
+  deliberate_gaps_before_production:
+    - no_imu_preintegration
+    - no_livox_per_point_time_deskew
+    - no_pose_graph_or_loop_closure
+    - no_submap_persistence
+
+frontend_lio:
+  design_reference: fast_lio2_style_iterated_ekf
+  state:
+    - position
+    - velocity
+    - orientation
+    - imu_bias_accel
+    - imu_bias_gyro
+    - gravity
+    - optional_lidar_time_offsets
+  update_model:
+    type: direct_point_to_local_map
+    map_structure: incremental_voxel_or_kdtree_local_map
+    measurement_sets:
+      front_mid360:
+        extrinsic_state: fixed_then_optionally_refined
+        covariance_scale: 1.0
+      rear_mid360:
+        extrinsic_state: fixed_then_optionally_refined
+        covariance_scale: 1.0
+      wheel_odom:
+        use_as: planar_velocity_prior
+        reject_when_slip_detected: true
+  keyframe_policy:
+    translation_m: 0.8
+    rotation_deg: 8.0
+    time_s: 2.0
+  degeneracy_detection:
+    method: hessian_or_observability_eigenvalues
+    action:
+      - weaken_degenerate_lidar_directions
+      - increase_output_covariance
+      - rely_more_on_imu_and_wheel_prior
+
+submap_manager:
+  submap_creation:
+    keyframes_per_submap: 60
+    max_submap_length_m: 45.0
+    overlap_keyframes: 10
+  storage:
+    cloud_format: pcd_or_laz_per_submap
+    graph_format: yaml_or_sqlite_metadata_plus_g2o
+    descriptors: scan_context_or_ring_key
+    index: tile_or_submap_bounding_boxes
+  publish_policy:
+    active_submap_hz: 2.0
+    global_map_hz: 0.1
+    global_map_downsample_m: 0.25
+
+backend_pose_graph:
+  design_reference: lio_sam_or_glim_style_factor_graph
+  factors:
+    - frontend_lio_between_factor
+    - loop_closure_factor
+    - wheel_planar_motion_factor
+    - optional_gnss_factor
+    - optional_manual_anchor_factor
+  robust_estimation:
+    robust_kernel: huber_or_cauchy
+    switchable_constraints: true
+  optimization:
+    incremental_window: fixed_lag_for_recent_keyframes
+    global_optimization_trigger:
+      - accepted_loop_closure
+      - submap_finished
+      - manual_save_request
+
+loop_closure:
+  candidate_generation:
+    descriptor: scan_context_family
+    min_travel_distance_m: 20.0
+    exclude_recent_keyframes: 80
+  geometric_verification:
+    method: gicp_or_ndt_on_submaps
+    min_overlap_ratio: 0.35
+    max_fitness_score: 1.5
+    max_translation_m: 15.0
+    max_yaw_deg: 45.0
+  rejection_logging:
+    record_candidate_count: true
+    record_fitness: true
+    record_inlier_ratio: true
+    record_transform_magnitude: true
+
+runtime_health_metrics:
+  required:
+    - front_lidar_rate_hz
+    - rear_lidar_rate_hz
+    - imu_rate_hz
+    - wheel_odom_rate_hz
+    - lidar_imu_time_delta_ms
+    - frontend_latency_ms
+    - backend_optimization_time_ms
+    - keyframe_count
+    - submap_count
+    - loop_candidates
+    - accepted_loops
+    - rejected_loops
+    - degeneracy_score
+    - z_drift_estimate_m
+    - map_memory_mb
+
+validation_ladder:
+  - static_dual_lidar_imu_time_sync_bag
+  - single_front_mid360_lio_bag
+  - single_rear_mid360_lio_bag
+  - dual_mid360_short_loop_bag
+  - rough_outdoor_large_loop_bag
+  - open_field_degeneracy_bag
+  - long_duration_memory_bag
+  - one_lidar_dropout_bag
+  - wheel_slip_bag

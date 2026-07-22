@@ -1,0 +1,162 @@
+scan_to_map_icp_node:
+  ros__parameters:
+    use_sim_time: false
+
+    # Frames. TF publication is disabled by default so this prototype cannot
+    # fight existing localization or AMCL owners.
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: false
+
+    # Learning-stage inputs. These are PointCloud2 debug streams, not the final
+    # production LIO raw Livox contract.
+    primary_cloud_topic: /slam_3d/input/mid360_front/points_debug
+    secondary_cloud_topic: /slam_3d/input/mid360_rear/points_debug
+    use_secondary_cloud: true
+    max_secondary_stamp_delta_s: 0.05
+    wheel_odom_topic: /motor_driver_node/odom
+    imu_topic: /imu/data
+    use_wheel_prediction: true
+    use_constant_velocity_prediction: true
+    use_scan_to_scan_prediction: false
+    use_scan_to_scan_fallback: false
+    add_scan_to_scan_fallback_keyframes: false
+    use_motion_prior_fallback: false
+    add_motion_prior_fallback_keyframes: false
+    use_tf_transforms: true
+    deskew_enabled: false
+    deskew_point_time_field: auto
+    deskew_point_time_scale: 0.0
+    deskew_point_time_offset_s: 0.0
+    deskew_max_scan_duration_s: 0.2
+    deskew_max_imu_gap_s: 0.05
+    deskew_imu_buffer_duration_s: 5.0
+    imu_subscription_depth: 400
+    deskew_min_time_ratio: 0.5
+    deskew_time_bin_s: 0.001
+    deskew_angular_velocity_scale: 1.0
+    deskew_imu_to_base_roll_deg: 0.0
+    deskew_imu_to_base_pitch_deg: 0.0
+    deskew_imu_to_base_yaw_deg: 0.0
+    imu_rotation_prediction_enabled: false
+    imu_rotation_prediction_max_dt_s: 0.5
+    imu_rotation_prediction_scale: 1.0
+    imu_roughness_detection_enabled: false
+    imu_roughness_window_s: 0.35
+    imu_roughness_recent_event_window_s: 1.0
+    imu_roughness_angular_velocity_threshold_radps: 2.5
+    imu_roughness_angular_accel_threshold_radps2: 40.0
+    imu_roughness_accel_norm_delta_threshold_mps2: 3.0
+    imu_roughness_linear_jerk_threshold_mps3: 60.0
+
+    # Isolated prototype outputs.
+    odom_topic: /slam_3d/frontend/odom
+    path_topic: /slam_3d/frontend/path
+    local_map_topic: /slam_3d/map/active_submap
+    global_map_topic: /slam_3d/map/global_cloud
+    health_topic: /slam_3d/health
+
+    # Registration. GICP is more tolerant than point-to-point ICP for rough
+    # outdoor scans, but slower.
+    registration_method: gicp
+    max_icp_iterations: 40
+    icp_max_correspondence_m: 2.0
+    fitness_score_threshold: 2.0
+    robust_registration_enabled: false
+    robust_registration_trim_ratio: 0.85
+    robust_registration_refinement_max_correspondence_m: 0.8
+    robust_registration_refinement_iterations: 15
+    robust_registration_quality_max_correspondence_m: 0.8
+    constant_velocity_translation_limit_m: 2.0
+    constant_velocity_rotation_limit_deg: 30.0
+    motion_prior_fallback_max_step_m: 0.0
+    motion_prior_fallback_max_z_step_m: 0.0
+    motion_prior_fallback_max_untrusted_distance_m: 0.0
+    motion_prior_fallback_max_untrusted_z_m: 0.0
+    motion_prior_fallback_max_rotation_deg: 0.0
+    max_registration_correction_translation_m: 4.0
+    max_registration_correction_rotation_deg: 60.0
+    min_registration_inlier_ratio: 0.15
+    max_registration_inlier_rmse_m: 1.5
+
+    # Filtering for large outdoor maps.
+    min_range_m: 0.5
+    max_range_m: 80.0
+    z_min_m: -5.0
+    z_max_m: 8.0
+    scan_voxel_leaf_m: 0.25
+    adaptive_scan_voxel_enabled: false
+    adaptive_scan_voxel_leaf_m: 0.15
+    adaptive_scan_voxel_min_points: 900
+    map_voxel_leaf_m: 0.35
+    min_scan_points: 200
+
+    # Robot self-crop box in base_link.
+    crop_box_enabled: true
+    crop_min_x: -0.6
+    crop_max_x: 0.6
+    crop_min_y: -0.45
+    crop_max_y: 0.45
+    crop_min_z: -0.8
+    crop_max_z: 0.8
+
+    # Keyframe/local-map policy.
+    keyframe_translation_m: 0.8
+    keyframe_rotation_deg: 8.0
+    quarantine_keyframes_on_shock: false
+    quarantine_pose_on_shock: false
+    record_tracking_scan_on_pose_quarantine: false
+    keyframe_quarantine_correction_translation_m: 0.8
+    keyframe_quarantine_correction_rotation_deg: 15.0
+    place_recognition_enabled: false
+    place_recognition_periodic_enabled: false
+    place_recognition_require_pose_graph_correction: false
+    place_recognition_periodic_min_interval_s: 3.0
+    place_recognition_relocalization_min_interval_s: 0.0
+    place_recognition_shock_relocalization_cooldown_s: 0.0
+    place_recognition_descriptor_bins: 60
+    place_recognition_descriptor_rings: 1
+    place_recognition_min_keyframes: 25
+    place_recognition_exclude_recent_keyframes: 20
+    place_recognition_max_candidates: 4
+    place_recognition_candidate_map_neighbors: 6
+    place_recognition_max_descriptor_distance: 0.20
+    place_recognition_min_inlier_ratio: 0.35
+    place_recognition_max_inlier_rmse_m: 0.8
+    place_recognition_max_pose_jump_m: 3.0
+    place_recognition_max_pose_jump_rotation_deg: 45.0
+    place_recognition_max_yaw_offset_deg: 180.0
+    pose_graph_correction_enabled: false
+    pose_graph_planar_correction_enabled: false
+    pose_graph_robust_loop_enabled: false
+    planar_pose_constraint_enabled: false
+    planar_pose_max_z_correction_m: 0.0
+    gravity_roll_pitch_constraint_enabled: false
+    gravity_accel_low_pass_alpha: 0.02
+    gravity_accel_min_norm_mps2: 6.0
+    gravity_accel_max_norm_mps2: 13.0
+    map_z_filter_enabled: false
+    map_z_filter_min_m: -5.0
+    map_z_filter_max_m: 8.0
+    pose_graph_correction_min_keyframes: 5
+    pose_graph_correction_max_translation_m: 5.0
+    pose_graph_correction_max_rotation_deg: 45.0
+    pose_graph_correction_min_interval_s: 1.0
+    pose_graph_optimization_iterations: 25
+    pose_graph_optimization_step: 0.15
+    pose_graph_odom_translation_weight: 1.0
+    pose_graph_odom_rotation_weight: 1.0
+    pose_graph_loop_translation_weight: 1.0
+    pose_graph_loop_rotation_weight: 1.0
+    pose_graph_loop_cauchy_scale: 1.0
+    pose_graph_max_iteration_translation_step_m: 0.25
+    pose_graph_max_iteration_rotation_step_deg: 5.0
+    pose_graph_max_loop_residual_before: 0.0
+    pose_graph_max_residual_after: 0.0
+    pose_graph_max_residual_ratio: 0.0
+    local_map_radius_m: 35.0
+    max_keyframes: 500
+    max_local_keyframes: 80
+    max_path_poses: 10000
+    map_publish_period_s: 1.0

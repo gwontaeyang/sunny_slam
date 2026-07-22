@@ -1,0 +1,49 @@
+slam_3d_wheel_imu_ekf_node:
+  ros__parameters:
+    frequency: 100.0
+    sensor_timeout: 0.15
+    two_d_mode: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # Keep TF ownership with the selected 3D SLAM/localization backend during
+    # experiments. This EKF publishes /slam_3d/reference/wheel_imu_odom as a
+    # reference stream.
+    publish_tf: false
+    print_diagnostics: true
+    reset_on_time_jump: true
+    predict_to_current_time: true
+
+    odom0: /motor_driver_node/odom
+    odom0_config: [true,  true,  false,
+                   false, false, true,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 20
+    odom0_pose_rejection_threshold: 5.0
+    odom0_twist_rejection_threshold: 2.0
+
+    imu0: /imu/data
+    imu0_config: [false, false, false,
+                  true,  true,  false,
+                  false, false, false,
+                  true,  true,  true,
+                  true,  true,  true]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 100
+    imu0_pose_rejection_threshold: 1.0
+    imu0_angular_velocity_rejection_threshold: 1.0
+    imu0_linear_acceleration_rejection_threshold: 3.0
+
+    gravitational_acceleration: 9.80665
+
+    # Keep covariance defaults until field bags are available. When tuning,
+    # provide full 15x15 arrays as expected by robot_localization.
