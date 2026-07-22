@@ -25,7 +25,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
     use_lifecycle_manager = LaunchConfiguration("use_lifecycle_manager")
-    params_file = LaunchConfiguration("params_file")
+    slam_params_file = LaunchConfiguration("slam_params_file")
     scan_topic = LaunchConfiguration("scan_topic")
 
     declare_use_sim_time = DeclareLaunchArgument(
@@ -58,10 +58,13 @@ def generate_launch_description():
         default_value="false",
         description="Leave lifecycle transitions to an external manager when true.",
     )
-    declare_params_file = DeclareLaunchArgument(
-        "params_file",
+    declare_slam_params_file = DeclareLaunchArgument(
+        "slam_params_file",
         default_value=default_params_file,
-        description="Path to slam_toolbox params YAML file.",
+        description=(
+            "Path to slam_toolbox params YAML file. The SLAM-specific argument name "
+            "prevents collisions with device launch files that also declare params_file."
+        ),
     )
     declare_scan_topic = DeclareLaunchArgument(
         "scan_topic",
@@ -76,7 +79,7 @@ def generate_launch_description():
         output="screen",
         namespace="",
         parameters=[
-            params_file,
+            slam_params_file,
             {
                 "use_sim_time": use_sim_time,
                 "scan_topic": scan_topic,
@@ -119,7 +122,7 @@ def generate_launch_description():
             declare_mode,
             declare_autostart,
             declare_use_lifecycle_manager,
-            declare_params_file,
+            declare_slam_params_file,
             declare_scan_topic,
             slam_toolbox_node,
             configure_event,
