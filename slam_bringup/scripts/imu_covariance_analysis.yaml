@@ -1,0 +1,20 @@
+imu_covariance_recommendations:
+  angular_velocity_covariance:
+    note: (rad/s)² 단위
+    vpitch: 5.308250868381265e-13
+    vroll: 4.098878103137664e-13
+    vyaw: 4.335263543221463e-13
+  linear_acceleration_covariance:
+    ax: 4.3123487787271535e-12
+    ay: 3.897953324666227e-12
+    az: 6.157283919917082e-12
+    note: (m/s²)² 단위
+  orientation_covariance:
+    note: rad² 단위. EKF 설정 파일의 imu0_config에서 yaw를 false로 설정했다면 yaw는 0.0 사용
+    pitch: 2.2136228685297294e-08
+    roll: 5.202509687020747e-09
+    yaw: 2.1539905100010106e-08
+  statistics:
+    duration_seconds: 30.0
+    samples_collected: 3001
+    sampling_rate_hz: 100.03333333333333
