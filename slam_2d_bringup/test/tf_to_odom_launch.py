@@ -5,6 +5,7 @@ from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 
+
 def generate_launch_description():
     # Launch arguments
     parent_frame_arg = DeclareLaunchArgument(
@@ -33,7 +34,7 @@ def generate_launch_description():
 
     # TF to Odometry node
     tf_to_odom_node = Node(
-        package='slam_bringup',
+        package='slam_2d_core',
         executable='tf_to_odom_node',
         name='tf_to_odom_node',
         output='screen',

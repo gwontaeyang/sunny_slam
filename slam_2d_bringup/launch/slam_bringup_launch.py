@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import os
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, EmitEvent, LogInfo,
@@ -12,12 +14,13 @@ from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
-import os
+
 
 def generate_launch_description():
     # Get package directories
-    slam_bringup_dir = get_package_share_directory('slam_bringup')
-    config_file = os.path.join(slam_bringup_dir, 'config', 'mapper_params.yaml')
+    slam_2d_bringup_dir = get_package_share_directory('slam_2d_bringup')
+    config_file = os.path.join(
+        slam_2d_bringup_dir, 'config', 'mapper_params.yaml')
 
     autostart = LaunchConfiguration('autostart')
     use_lifecycle_manager = LaunchConfiguration("use_lifecycle_manager")

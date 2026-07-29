@@ -26,7 +26,7 @@ kt_double ScanMatcher::MatchScan<LocalizedRangeScanVector>(
 
 }  // namespace karto
 
-namespace slam_bringup
+namespace slam_2d_core
 {
 
 struct CachedRoughnessAnchorScan
@@ -198,6 +198,6 @@ private:
   std::set<std::pair<int, int>> injected_edges_;
 };
 
-}  // namespace slam_bringup
+}  // namespace slam_2d_core
 
 #endif  // SLAM_BRINGUP__ROUGHNESS_ANCHOR_SLAM_TOOLBOX_HPP_

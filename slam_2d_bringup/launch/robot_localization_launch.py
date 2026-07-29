@@ -11,10 +11,11 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # Get package directory
-    slam_bringup_dir = get_package_share_directory('slam_bringup')
+    slam_2d_bringup_dir = get_package_share_directory('slam_2d_bringup')
 
     # Path to the config file
-    config_file = os.path.join(slam_bringup_dir, 'config', 'ekf_localization_params.yaml')
+    config_file = os.path.join(
+        slam_2d_bringup_dir, 'config', 'ekf_localization_params.yaml')
 
     # Launch argument for config file override
     declare_config_file = DeclareLaunchArgument(

@@ -1,4 +1,4 @@
-#include "slam_bringup/roughness_anchor_slam_toolbox.hpp"
+#include "slam_2d_core/roughness_anchor_slam_toolbox.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -147,7 +147,7 @@ RawWindowSide rawWindowSide(const std::string & role, bool target)
 
 }  // namespace
 
-namespace slam_bringup
+namespace slam_2d_core
 {
 
 RoughnessAnchorSlamToolbox::RoughnessAnchorSlamToolbox(rclcpp::NodeOptions options)
@@ -1660,4 +1660,4 @@ karto::Matrix3 RoughnessAnchorSlamToolbox::makeAnchorCovariance() const
   return covariance;
 }
 
-}  // namespace slam_bringup
+}  // namespace slam_2d_core

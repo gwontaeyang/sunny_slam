@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
-project(slam_bringup)
+project(slam_2d_core)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -47,10 +46,9 @@ find_library(CERES_SOLVER_PLUGIN_LIBRARY
   REQUIRED
 )
 
-include_directories(include)
-
-# Create executable (test 폴더의 파일 사용)
-add_executable(tf_to_odom_node test/tf_to_odom_node.cpp)
+add_executable(tf_to_odom_node
+  src/tf_to_odom_node.cpp
+)
 ament_target_dependencies(tf_to_odom_node
   rclcpp
   nav_msgs
@@ -60,17 +58,16 @@ ament_target_dependencies(tf_to_odom_node
   tf2_geometry_msgs
 )
 
-# Install executable
-install(TARGETS tf_to_odom_node
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 add_executable(roughness_anchor_slam_toolbox_node
   src/karto_scan_matcher_vector.cpp
   src/roughness_anchor_slam_toolbox.cpp
   src/roughness_anchor_slam_toolbox_node.cpp
 )
 target_compile_features(roughness_anchor_slam_toolbox_node PUBLIC cxx_std_17)
+target_include_directories(roughness_anchor_slam_toolbox_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 ament_target_dependencies(roughness_anchor_slam_toolbox_node
   rclcpp
   nav_msgs
@@ -98,10 +95,6 @@ target_link_libraries(roughness_anchor_slam_toolbox_node
   TBB::tbb
 )
 
-install(TARGETS roughness_anchor_slam_toolbox_node
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 add_executable(slam_pose_graph_exporter
   src/slam_pose_graph_exporter.cpp
 )
@@ -117,42 +110,22 @@ target_link_libraries(slam_pose_graph_exporter
   TBB::tbb
 )
 
-install(TARGETS slam_pose_graph_exporter
+install(TARGETS
+  tf_to_odom_node
+  roughness_anchor_slam_toolbox_node
+  slam_pose_graph_exporter
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install launch files
-install(DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME}/
-)
-
-# Install test launch files
-install(DIRECTORY test
-  DESTINATION share/${PROJECT_NAME}/
-  FILES_MATCHING PATTERN "*.py"
-)
-
-# Install config files
-install(DIRECTORY config
-  DESTINATION share/${PROJECT_NAME}/
-)
-
-# Install scripts
-install(DIRECTORY scripts
-  DESTINATION share/${PROJECT_NAME}/
-  FILES_MATCHING PATTERN "*.py"
-  PATTERN "__pycache__" EXCLUDE
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
+  set(ament_cmake_xmllint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
 

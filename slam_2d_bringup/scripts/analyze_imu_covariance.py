@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-IMU 센서 데이터 분석 스크립트
+IMU 센서 데이터 공분산 분석 도구.
+
 실시간으로 IMU 토픽을 구독하여 공분산 값을 계산합니다.
 
 사용법:
-    python3 analyze_imu_covariance.py [--topic /imu/data_raw] [--duration 30] [--output output.yaml]
+    python3 analyze_imu_covariance.py [--topic /imu/data_raw]
+        [--duration 30] [--output output.yaml]
 """
 
+import argparse
+import time
+
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
-import numpy as np
-import argparse
 import yaml
-from collections import deque
-import time
 
 
 class IMUCovarianceAnalyzer(Node):
@@ -42,13 +44,13 @@ class IMUCovarianceAnalyzer(Node):
             10
         )
 
-        self.get_logger().info(f'IMU 공분산 분석 시작')
+        self.get_logger().info('IMU 공분산 분석 시작')
         self.get_logger().info(f'토픽: {topic_name}')
         self.get_logger().info(f'수집 시간: {duration}초')
         self.get_logger().info('센서를 정지 상태로 두고 데이터를 수집합니다...')
 
     def quaternion_to_euler(self, x, y, z, w):
-        """Quaternion을 Euler angle (roll, pitch, yaw)로 변환"""
+        """Quaternion을 Euler angle (roll, pitch, yaw)로 변환합니다."""
         import math
 
         # Roll (x-axis rotation)
@@ -71,7 +73,7 @@ class IMUCovarianceAnalyzer(Node):
         return roll, pitch, yaw
 
     def imu_callback(self, msg):
-        """IMU 메시지 콜백"""
+        """IMU 메시지 콜백입니다."""
         if not self.collection_started:
             self.start_time = time.time()
             self.collection_started = True
@@ -110,10 +112,13 @@ class IMUCovarianceAnalyzer(Node):
         # 진행 상황 출력 (1초마다)
         if len(self.orientations) % 100 == 0:  # 약 1초마다 (100Hz 가정)
             remaining = self.duration - elapsed
-            self.get_logger().info(f'수집 중... ({elapsed:.1f}/{self.duration}초, 남은 시간: {remaining:.1f}초)')
+            self.get_logger().info(
+                f'수집 중... ({elapsed:.1f}/{self.duration}초, '
+                f'남은 시간: {remaining:.1f}초)'
+            )
 
     def analyze_and_save(self):
-        """수집된 데이터를 분석하고 결과를 저장"""
+        """수집된 데이터를 분석하고 결과를 저장합니다."""
         self.get_logger().info('\n=== 데이터 분석 시작 ===')
 
         if len(self.orientations) == 0:
@@ -142,22 +147,70 @@ class IMUCovarianceAnalyzer(Node):
 
         # 결과 출력
         self.get_logger().info(f'\n수집된 샘플 수: {len(self.orientations)}')
-        self.get_logger().info(f'\n=== Orientation (Roll, Pitch, Yaw) ===')
-        self.get_logger().info(f'평균: [{orientation_mean[0]:.6f}, {orientation_mean[1]:.6f}, {orientation_mean[2]:.6f}] rad')
-        self.get_logger().info(f'평균 (도): [{np.degrees(orientation_mean[0]):.2f}, {np.degrees(orientation_mean[1]):.2f}, {np.degrees(orientation_mean[2]):.2f}] deg')
-        self.get_logger().info(f'분산: [{orientation_variance[0]:.6f}, {orientation_variance[1]:.6f}, {orientation_variance[2]:.6f}] rad²')
-        self.get_logger().info(f'표준편차: [{np.sqrt(orientation_variance[0]):.6f}, {np.sqrt(orientation_variance[1]):.6f}, {np.sqrt(orientation_variance[2]):.6f}] rad')
-        self.get_logger().info(f'표준편차 (도): [{np.degrees(np.sqrt(orientation_variance[0])):.2f}, {np.degrees(np.sqrt(orientation_variance[1])):.2f}, {np.degrees(np.sqrt(orientation_variance[2])):.2f}] deg')
+        self.get_logger().info('\n=== Orientation (Roll, Pitch, Yaw) ===')
+        self.get_logger().info(
+            f'평균: [{orientation_mean[0]:.6f}, {orientation_mean[1]:.6f}, '
+            f'{orientation_mean[2]:.6f}] rad'
+        )
+        self.get_logger().info(
+            f'평균 (도): [{np.degrees(orientation_mean[0]):.2f}, '
+            f'{np.degrees(orientation_mean[1]):.2f}, '
+            f'{np.degrees(orientation_mean[2]):.2f}] deg'
+        )
+        self.get_logger().info(
+            f'분산: [{orientation_variance[0]:.6f}, '
+            f'{orientation_variance[1]:.6f}, '
+            f'{orientation_variance[2]:.6f}] rad²'
+        )
+        self.get_logger().info(
+            f'표준편차: [{np.sqrt(orientation_variance[0]):.6f}, '
+            f'{np.sqrt(orientation_variance[1]):.6f}, '
+            f'{np.sqrt(orientation_variance[2]):.6f}] rad'
+        )
+        self.get_logger().info(
+            f'표준편차 (도): '
+            f'[{np.degrees(np.sqrt(orientation_variance[0])):.2f}, '
+            f'{np.degrees(np.sqrt(orientation_variance[1])):.2f}, '
+            f'{np.degrees(np.sqrt(orientation_variance[2])):.2f}] deg'
+        )
 
-        self.get_logger().info(f'\n=== Angular Velocity (Vroll, Vpitch, Vyaw) ===')
-        self.get_logger().info(f'평균: [{angular_velocity_mean[0]:.6f}, {angular_velocity_mean[1]:.6f}, {angular_velocity_mean[2]:.6f}] rad/s')
-        self.get_logger().info(f'분산: [{angular_velocity_variance[0]:.6f}, {angular_velocity_variance[1]:.6f}, {angular_velocity_variance[2]:.6f}] (rad/s)²')
-        self.get_logger().info(f'표준편차: [{np.sqrt(angular_velocity_variance[0]):.6f}, {np.sqrt(angular_velocity_variance[1]):.6f}, {np.sqrt(angular_velocity_variance[2]):.6f}] rad/s')
+        self.get_logger().info(
+            '\n=== Angular Velocity (Vroll, Vpitch, Vyaw) ==='
+        )
+        self.get_logger().info(
+            f'평균: [{angular_velocity_mean[0]:.6f}, '
+            f'{angular_velocity_mean[1]:.6f}, '
+            f'{angular_velocity_mean[2]:.6f}] rad/s'
+        )
+        self.get_logger().info(
+            f'분산: [{angular_velocity_variance[0]:.6f}, '
+            f'{angular_velocity_variance[1]:.6f}, '
+            f'{angular_velocity_variance[2]:.6f}] (rad/s)²'
+        )
+        self.get_logger().info(
+            f'표준편차: [{np.sqrt(angular_velocity_variance[0]):.6f}, '
+            f'{np.sqrt(angular_velocity_variance[1]):.6f}, '
+            f'{np.sqrt(angular_velocity_variance[2]):.6f}] rad/s'
+        )
 
-        self.get_logger().info(f'\n=== Linear Acceleration (Ax, Ay, Az) ===')
-        self.get_logger().info(f'평균: [{linear_acceleration_mean[0]:.6f}, {linear_acceleration_mean[1]:.6f}, {linear_acceleration_mean[2]:.6f}] m/s²')
-        self.get_logger().info(f'분산: [{linear_acceleration_variance[0]:.6f}, {linear_acceleration_variance[1]:.6f}, {linear_acceleration_variance[2]:.6f}] (m/s²)²')
-        self.get_logger().info(f'표준편차: [{np.sqrt(linear_acceleration_variance[0]):.6f}, {np.sqrt(linear_acceleration_variance[1]):.6f}, {np.sqrt(linear_acceleration_variance[2]):.6f}] m/s²')
+        self.get_logger().info(
+            '\n=== Linear Acceleration (Ax, Ay, Az) ==='
+        )
+        self.get_logger().info(
+            f'평균: [{linear_acceleration_mean[0]:.6f}, '
+            f'{linear_acceleration_mean[1]:.6f}, '
+            f'{linear_acceleration_mean[2]:.6f}] m/s²'
+        )
+        self.get_logger().info(
+            f'분산: [{linear_acceleration_variance[0]:.6f}, '
+            f'{linear_acceleration_variance[1]:.6f}, '
+            f'{linear_acceleration_variance[2]:.6f}] (m/s²)²'
+        )
+        self.get_logger().info(
+            f'표준편차: [{np.sqrt(linear_acceleration_variance[0]):.6f}, '
+            f'{np.sqrt(linear_acceleration_variance[1]):.6f}, '
+            f'{np.sqrt(linear_acceleration_variance[2]):.6f}] m/s²'
+        )
 
         # EKF 설정용 추천 값 생성
         # 공분산 행렬은 9x9 형태이지만, 대각선 요소만 사용
@@ -219,7 +272,7 @@ self.imu_msg.linear_acceleration_covariance[8] = {linear_acceleration_variance[2
             with open(code_file, 'w') as f:
                 f.write(python_code)
 
-            self.get_logger().info(f'\n결과 저장 완료:')
+            self.get_logger().info('\n결과 저장 완료:')
             self.get_logger().info(f'  - {self.output_file} (YAML 형식)')
             self.get_logger().info(f'  - {code_file} (Python 코드)')
         else:

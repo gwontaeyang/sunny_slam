@@ -14,7 +14,12 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.events import matches_action
-from launch.substitutions import AndSubstitution, LaunchConfiguration, NotSubstitution, PythonExpression
+from launch.substitutions import (
+    AndSubstitution,
+    LaunchConfiguration,
+    NotSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
@@ -22,9 +27,9 @@ from lifecycle_msgs.msg import Transition
 
 
 def generate_launch_description():
-    slam_bringup_dir = get_package_share_directory("slam_bringup")
+    slam_2d_bringup_dir = get_package_share_directory("slam_2d_bringup")
     default_params_file = os.path.join(
-        slam_bringup_dir,
+        slam_2d_bringup_dir,
         "config",
         "mapper_params.yaml",
     )
@@ -103,7 +108,7 @@ def generate_launch_description():
             start_state="configuring",
             goal_state="inactive",
             entities=[
-                LogInfo(msg="[slam_bringup] Activating slam_toolbox."),
+                LogInfo(msg="[slam_2d_bringup] Activating slam_toolbox."),
                 EmitEvent(
                     event=ChangeState(
                         lifecycle_node_matcher=matches_action(slam_toolbox_node),
@@ -121,12 +126,21 @@ def generate_launch_description():
             start_state="activating",
             goal_state="active",
             entities=[
-                LogInfo(msg="[slam_bringup] SLAM is active. Starting bag playback."),
+                LogInfo(
+                    msg="[slam_2d_bringup] SLAM is active. Starting bag playback."),
                 TimerAction(
                     period=3.0,
                     actions=[
                         ExecuteProcess(
-                            cmd=["ros2", "bag", "play", bag_file, "--clock", "--rate", bag_play_rate],
+                            cmd=[
+                                "ros2",
+                                "bag",
+                                "play",
+                                bag_file,
+                                "--clock",
+                                "--rate",
+                                bag_play_rate,
+                            ],
                             output="screen",
                         )
                     ],

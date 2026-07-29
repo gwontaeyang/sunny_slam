@@ -3,14 +3,14 @@
 #include <thread>
 
 #include "rclcpp/rclcpp.hpp"
-#include "slam_bringup/roughness_anchor_slam_toolbox.hpp"
+#include "slam_2d_core/roughness_anchor_slam_toolbox.hpp"
 
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
 
   try {
-    auto node = std::make_shared<slam_bringup::RoughnessAnchorSlamToolbox>(
+    auto node = std::make_shared<slam_2d_core::RoughnessAnchorSlamToolbox>(
       rclcpp::NodeOptions());
     node->configure();
 

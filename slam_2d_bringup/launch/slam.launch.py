@@ -15,9 +15,9 @@ from lifecycle_msgs.msg import Transition
 
 
 def generate_launch_description():
-    slam_bringup_dir = get_package_share_directory("slam_bringup")
+    slam_2d_bringup_dir = get_package_share_directory("slam_2d_bringup")
     default_params_file = os.path.join(
-        slam_bringup_dir,
+        slam_2d_bringup_dir,
         "config",
         "mapper_params.yaml",
     )
@@ -99,7 +99,7 @@ def generate_launch_description():
             start_state="configuring",
             goal_state="inactive",
             entities=[
-                LogInfo(msg="[slam_bringup] Activating slam_toolbox."),
+                LogInfo(msg="[slam_2d_bringup] Activating slam_toolbox."),
                 EmitEvent(
                     event=ChangeState(
                         lifecycle_node_matcher=matches_action(slam_toolbox_node),

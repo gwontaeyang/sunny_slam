@@ -9,7 +9,8 @@
 class TfToOdomNode : public rclcpp::Node
 {
 public:
-  TfToOdomNode() : Node("tf_to_odom_node")
+  TfToOdomNode()
+  : Node("tf_to_odom_node")
   {
     RCLCPP_INFO(this->get_logger(), "tf_to_odom_node 시작");
 
@@ -56,7 +57,7 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
 
-  void publish_odom_from_tf(const std::string& parent_frame, const std::string& child_frame)
+  void publish_odom_from_tf(const std::string & parent_frame, const std::string & child_frame)
   {
     try {
       // TF 조회 (최신 transform)
@@ -103,7 +104,7 @@ private:
       // 발행
       odom_publisher_->publish(odom_msg);
 
-    } catch (tf2::TransformException &ex) {
+    } catch (tf2::TransformException & ex) {
       // TF를 찾을 수 없는 경우 (일반적으로 처음 시작할 때 발생)
       RCLCPP_WARN_THROTTLE(
         this->get_logger(),
@@ -118,7 +119,7 @@ private:
   }
 };
 
-int main(int argc, char **argv)
+int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<TfToOdomNode>());

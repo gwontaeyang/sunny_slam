@@ -41,7 +41,7 @@ SLAM_BAG_PLAY_TOPICS_LASERSCAN_ONLY = [
 
 
 def generate_launch_description():
-    slam_bringup_dir = get_package_share_directory('slam_bringup')
+    slam_2d_bringup_dir = get_package_share_directory('slam_2d_bringup')
 
     bag_file = LaunchConfiguration('bag_file')
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
@@ -810,7 +810,7 @@ def generate_launch_description():
     )
 
     slam_config = os.path.join(
-        slam_bringup_dir,
+        slam_2d_bringup_dir,
         'config',
         'roughness_anchor_mapper_params.yaml',
     )
@@ -835,7 +835,7 @@ def generate_launch_description():
     )
 
     roughness_anchor_slam_toolbox_node = Node(
-        package='slam_bringup',
+        package='slam_2d_core',
         executable='roughness_anchor_slam_toolbox_node',
         name='slam_toolbox',
         output='screen',
