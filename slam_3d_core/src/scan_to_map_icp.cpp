@@ -23,6 +23,7 @@
 #include "diagnostic_msgs/msg/key_value.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "sensor_msgs/msg/point_field.hpp"
+#include "slam_3d_core/registration_policy.hpp"
 
 namespace gole
 {
@@ -279,9 +280,15 @@ void ScanToMapIcp::setupParameters()
     "global_map_topic",
     "/slam_3d/map/global_cloud");
   health_topic_ = declare_parameter<std::string>("health_topic", "/slam_3d/health");
+  imu_watermark_topic_ = declare_parameter<std::string>(
+    "imu_watermark_topic",
+    "/slam_3d/imu_watermark_ns");
 
   registration_method_ = declare_parameter<std::string>("registration_method", "gicp");
   use_secondary_cloud_ = declare_parameter<bool>("use_secondary_cloud", false);
+  cloud_subscription_reliable_ = declare_parameter<bool>(
+    "cloud_subscription_reliable",
+    false);
   use_tf_transforms_ = declare_parameter<bool>("use_tf_transforms", true);
   use_wheel_prediction_ = declare_parameter<bool>("use_wheel_prediction", true);
   use_constant_velocity_prediction_ = declare_parameter<bool>(
@@ -495,6 +502,9 @@ void ScanToMapIcp::setupParameters()
   pose_graph_loop_cauchy_scale_ = declare_parameter<double>(
     "pose_graph_loop_cauchy_scale",
     1.0);
+  pose_graph_min_new_loop_robust_weight_ = declare_parameter<double>(
+    "pose_graph_min_new_loop_robust_weight",
+    0.0);
   pose_graph_max_iteration_translation_step_m_ = declare_parameter<double>(
     "pose_graph_max_iteration_translation_step_m",
     0.25);
@@ -516,12 +526,24 @@ void ScanToMapIcp::setupParameters()
   gravity_accel_low_pass_alpha_ = declare_parameter<double>(
     "gravity_accel_low_pass_alpha",
     0.02);
+  gravity_accel_time_constant_s_ = declare_parameter<double>(
+    "gravity_accel_time_constant_s",
+    0.0);
   gravity_accel_min_norm_mps2_ = declare_parameter<double>(
     "gravity_accel_min_norm_mps2",
     6.0);
   gravity_accel_max_norm_mps2_ = declare_parameter<double>(
     "gravity_accel_max_norm_mps2",
     13.0);
+  gravity_accel_max_age_s_ = declare_parameter<double>(
+    "gravity_accel_max_age_s",
+    0.1);
+  imu_reorder_tolerance_s_ = declare_parameter<double>(
+    "imu_reorder_tolerance_s",
+    0.02);
+  imu_timestamp_reset_threshold_s_ = declare_parameter<double>(
+    "imu_timestamp_reset_threshold_s",
+    0.5);
   map_z_filter_min_m_ = declare_parameter<double>(
     "map_z_filter_min_m",
     -5.0);
@@ -535,6 +557,9 @@ void ScanToMapIcp::setupParameters()
     "max_registration_inlier_rmse_m",
     1.5);
   map_publish_period_s_ = declare_parameter<double>("map_publish_period_s", 1.0);
+  scan_to_scan_max_reference_age_s_ = declare_parameter<double>(
+    "scan_to_scan_max_reference_age_s",
+    0.0);
 
   crop_min_x_ = declare_parameter<double>("crop_min_x", -0.6);
   crop_max_x_ = declare_parameter<double>("crop_max_x", 0.6);
@@ -569,6 +594,10 @@ void ScanToMapIcp::setupParameters()
   pose_graph_optimization_iterations_ = declare_parameter<int>(
     "pose_graph_optimization_iterations",
     25);
+  pose_quarantine_tracking_reset_interval_ = declare_parameter<int>(
+    "pose_quarantine_tracking_reset_interval",
+    0);
+  cloud_subscription_depth_ = declare_parameter<int>("cloud_subscription_depth", 5);
   imu_subscription_depth_ = declare_parameter<int>("imu_subscription_depth", 400);
   max_icp_iterations_ = declare_parameter<int>("max_icp_iterations", 40);
   robust_registration_refinement_iterations_ = declare_parameter<int>(
@@ -593,15 +622,27 @@ void ScanToMapIcp::setupRosInterfaces()
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
+  auto cloud_qos = rclcpp::QoS(
+    rclcpp::KeepLast(std::max(1, cloud_subscription_depth_))).durability_volatile();
+  if (cloud_subscription_reliable_) {
+    cloud_qos.reliable();
+  } else {
+    cloud_qos.best_effort();
+  }
+
   primary_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
     primary_cloud_topic_,
-    rclcpp::SensorDataQoS(),
+    cloud_qos,
     std::bind(&ScanToMapIcp::primaryCloudCallback, this, std::placeholders::_1));
 
   if (use_secondary_cloud_) {
+    const auto secondary_cloud_qos = rclcpp::QoS(
+      rclcpp::KeepLast(std::max(1, cloud_subscription_depth_)))
+      .best_effort()
+      .durability_volatile();
     secondary_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       secondary_cloud_topic_,
-      rclcpp::SensorDataQoS(),
+      secondary_cloud_qos,
       std::bind(&ScanToMapIcp::secondaryCloudCallback, this, std::placeholders::_1));
   }
 
@@ -635,6 +676,9 @@ void ScanToMapIcp::setupRosInterfaces()
   health_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
     health_topic_,
     rclcpp::QoS(10));
+  imu_watermark_pub_ = create_publisher<std_msgs::msg::Int64>(
+    imu_watermark_topic_,
+    rclcpp::QoS(1).reliable().transient_local());
 
   const auto map_publish_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::duration<double>(std::max(map_publish_period_s_, 0.1)));
@@ -675,8 +719,6 @@ void ScanToMapIcp::wheelOdomCallback(const nav_msgs::msg::Odometry::SharedPtr ms
 
 void ScanToMapIcp::imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
 {
-  std::lock_guard<std::mutex> lock(imu_mutex_);
-  latest_imu_stamp_ = msg->header.stamp;
   ImuSample sample;
   sample.stamp = msg->header.stamp;
   sample.angular_velocity = Eigen::Vector3d(
@@ -687,37 +729,86 @@ void ScanToMapIcp::imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
     msg->linear_acceleration.x,
     msg->linear_acceleration.y,
     msg->linear_acceleration.z);
-  imu_buffer_.push_back(sample);
 
-  if (gravity_roll_pitch_constraint_enabled_) {
-    const Eigen::Matrix3d imu_to_base = rotationFromRpyDegrees(
-      deskew_imu_to_base_roll_deg_,
-      deskew_imu_to_base_pitch_deg_,
-      deskew_imu_to_base_yaw_deg_);
-    const Eigen::Vector3d accel_base = imu_to_base * Eigen::Vector3d(
-      msg->linear_acceleration.x,
-      msg->linear_acceleration.y,
-      msg->linear_acceleration.z);
-    const double accel_norm = accel_base.norm();
-    const double min_norm = std::max(0.0, gravity_accel_min_norm_mps2_);
-    const double max_norm = std::max(min_norm, gravity_accel_max_norm_mps2_);
-    if (std::isfinite(accel_norm) && accel_norm >= min_norm && accel_norm <= max_norm) {
-      const double alpha = std::clamp(gravity_accel_low_pass_alpha_, 0.0, 1.0);
-      if (!have_gravity_accel_base_ || alpha >= 1.0) {
-        gravity_accel_base_ = accel_base;
-        have_gravity_accel_base_ = true;
-      } else if (alpha > 0.0) {
-        gravity_accel_base_ = (1.0 - alpha) * gravity_accel_base_ + alpha * accel_base;
+  {
+    std::lock_guard<std::mutex> lock(imu_mutex_);
+    const double buffer_duration = std::max(0.1, deskew_imu_buffer_duration_s_);
+    if (!imu_buffer_.empty()) {
+      const double dt_from_latest = (sample.stamp - imu_buffer_.back().stamp).seconds();
+      if (dt_from_latest <= 0.0) {
+        const double rewind_s = -dt_from_latest;
+        const double reorder_tolerance_s = std::max(0.0, imu_reorder_tolerance_s_);
+        const double reset_threshold_s = std::max(
+          reorder_tolerance_s,
+          std::max(1.0e-6, imu_timestamp_reset_threshold_s_));
+        if (rewind_s <= std::numeric_limits<double>::epsilon()) {
+          ++imu_duplicate_dropped_count_;
+        } else {
+          ++imu_rewind_dropped_count_;
+        }
+        if (rewind_s >= reset_threshold_s) {
+          ++imu_timestamp_reset_count_;
+        }
+        ++imu_out_of_order_dropped_count_;
+        return;
       }
+    }
+
+    latest_imu_stamp_ = sample.stamp;
+    imu_buffer_.push_back(sample);
+
+    if (gravity_roll_pitch_constraint_enabled_) {
+      const Eigen::Matrix3d imu_to_base = rotationFromRpyDegrees(
+        deskew_imu_to_base_roll_deg_,
+        deskew_imu_to_base_pitch_deg_,
+        deskew_imu_to_base_yaw_deg_);
+      const Eigen::Vector3d accel_base = imu_to_base * Eigen::Vector3d(
+        msg->linear_acceleration.x,
+        msg->linear_acceleration.y,
+        msg->linear_acceleration.z);
+      const double accel_norm = accel_base.norm();
+      const double min_norm = std::max(0.0, gravity_accel_min_norm_mps2_);
+      const double max_norm = std::max(min_norm, gravity_accel_max_norm_mps2_);
+      if (std::isfinite(accel_norm) && accel_norm >= min_norm && accel_norm <= max_norm) {
+        double alpha = std::clamp(gravity_accel_low_pass_alpha_, 0.0, 1.0);
+        const double time_constant = std::max(0.0, gravity_accel_time_constant_s_);
+        if (time_constant > 0.0 && have_last_gravity_accel_stamp_) {
+          const double gravity_dt = (sample.stamp - last_gravity_accel_stamp_).seconds();
+          if (std::isfinite(gravity_dt) && gravity_dt > 0.0) {
+            alpha = -std::expm1(-gravity_dt / time_constant);
+          } else {
+            alpha = 0.0;
+          }
+        }
+        if (!have_gravity_accel_base_ || alpha >= 1.0) {
+          gravity_accel_base_ = accel_base;
+          have_gravity_accel_base_ = true;
+        } else if (alpha > 0.0) {
+          gravity_accel_base_ = (1.0 - alpha) * gravity_accel_base_ + alpha * accel_base;
+        }
+        latest_gravity_filter_alpha_ = alpha;
+        last_gravity_accel_stamp_ = sample.stamp;
+        have_last_gravity_accel_stamp_ = true;
+        gravity_buffer_.push_back(
+          GravitySample{sample.stamp, gravity_accel_base_, latest_gravity_filter_alpha_});
+      }
+    }
+
+    while (!imu_buffer_.empty() &&
+      (sample.stamp - imu_buffer_.front().stamp).seconds() > buffer_duration)
+    {
+      imu_buffer_.pop_front();
+    }
+    while (!gravity_buffer_.empty() &&
+      (sample.stamp - gravity_buffer_.front().stamp).seconds() > buffer_duration)
+    {
+      gravity_buffer_.pop_front();
     }
   }
 
-  const double buffer_duration = std::max(0.1, deskew_imu_buffer_duration_s_);
-  while (!imu_buffer_.empty() &&
-    (sample.stamp - imu_buffer_.front().stamp).seconds() > buffer_duration)
-  {
-    imu_buffer_.pop_front();
-  }
+  std_msgs::msg::Int64 watermark;
+  watermark.data = sample.stamp.nanoseconds();
+  imu_watermark_pub_->publish(watermark);
 }
 
 void ScanToMapIcp::mapPublishTimerCallback()
@@ -730,13 +821,57 @@ void ScanToMapIcp::mapPublishTimerCallback()
 
 void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr & primary_msg)
 {
+  const rclcpp::Time stamp(primary_msg->header.stamp);
+  bool gravity_sample_stale = false;
+  const auto gravity_sample = gravitySampleAt(stamp, gravity_sample_stale);
   DeskewStats deskew_stats;
   auto scan_base = buildBaseFrameScan(*primary_msg, deskew_stats);
   auto attach_deskew_stats = [this, &deskew_stats](RegistrationResult & result) {
       applyDeskewStatsToResult(deskew_stats, result);
     };
+  auto attach_gravity_stats =
+    [this, &gravity_sample, &gravity_sample_stale, &stamp](
+    RegistrationResult & registration_result)
+    {
+      if (!gravity_roll_pitch_constraint_enabled_) {
+        registration_result.gravity_constraint_status = "disabled";
+        return;
+      }
+      if (!gravity_sample.has_value()) {
+        registration_result.gravity_constraint_status = gravity_sample_stale ?
+          "stale_at_cloud_stamp" : "unavailable_at_cloud_stamp";
+        return;
+      }
+      registration_result.gravity_accel_used = true;
+      registration_result.gravity_accel_age_s =
+        std::max(0.0, (stamp - gravity_sample->stamp).seconds());
+      registration_result.gravity_accel_norm_mps2 = gravity_sample->accel_base.norm();
+      registration_result.gravity_filter_alpha = gravity_sample->filter_alpha;
+      const Eigen::Vector3d normalized_gravity = gravity_sample->accel_base.normalized();
+      registration_result.gravity_roll_deg =
+        std::atan2(normalized_gravity.y(), normalized_gravity.z()) * 180.0 / M_PI;
+      registration_result.gravity_pitch_deg =
+        std::atan2(
+        -normalized_gravity.x(),
+        std::hypot(normalized_gravity.y(), normalized_gravity.z())) * 180.0 / M_PI;
+      registration_result.gravity_constraint_status = "timestamped_snapshot";
+    };
 
   if (!scan_base || static_cast<int>(scan_base->size()) < min_scan_points_) {
+    const int scan_points = scan_base ? static_cast<int>(scan_base->size()) : 0;
+    RegistrationResult result;
+    result.rejection_reason = "scan_too_sparse_before_downsample";
+    result.scan_points_before_downsample = scan_points;
+    result.scan_points_after_downsample = scan_points;
+    result.scan_voxel_leaf_m = scan_voxel_leaf_m_;
+    attach_deskew_stats(result);
+    attach_gravity_stats(result);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      consecutive_pose_quarantine_count_ = 0;
+      last_registration_ = result;
+      publishDiagnostics(stamp, result);
+    }
     RCLCPP_WARN_THROTTLE(
       get_logger(),
       *get_clock(),
@@ -751,7 +886,6 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
   const int scan_points_after_downsample = static_cast<int>(scan_base->size());
   const bool scan_voxel_adapted = std::abs(effective_scan_voxel_leaf_m - scan_voxel_leaf_m_) >
     std::numeric_limits<double>::epsilon();
-  const rclcpp::Time stamp(primary_msg->header.stamp);
 
   std::lock_guard<std::mutex> lock(state_mutex_);
   if (static_cast<int>(scan_base->size()) < min_scan_points_) {
@@ -762,6 +896,8 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
     result.scan_voxel_leaf_m = effective_scan_voxel_leaf_m;
     result.scan_voxel_adapted = scan_voxel_adapted;
     attach_deskew_stats(result);
+    attach_gravity_stats(result);
+    consecutive_pose_quarantine_count_ = 0;
     last_registration_ = result;
     RCLCPP_WARN_THROTTLE(
       get_logger(),
@@ -808,6 +944,7 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
     last_registration_.keyframe_added = true;
     attach_deskew_stats(last_registration_);
     attach_imu_roughness_stats(last_registration_);
+    attach_gravity_stats(last_registration_);
     publishState(stamp);
     publishDiagnostics(stamp, last_registration_);
     return;
@@ -816,7 +953,12 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
   bool used_scan_to_scan_prediction = false;
   bool used_imu_rotation_prediction = false;
   std::string imu_rotation_prediction_status{"disabled"};
+  double scan_to_scan_reference_age_s = 0.0;
+  std::string scan_to_scan_prediction_status{"disabled"};
   auto attach_prediction_stats = [&](RegistrationResult & registration_result) {
+      registration_result.scan_to_scan_prediction_used = used_scan_to_scan_prediction;
+      registration_result.scan_to_scan_reference_age_s = scan_to_scan_reference_age_s;
+      registration_result.scan_to_scan_prediction_status = scan_to_scan_prediction_status;
       registration_result.imu_rotation_prediction_used = used_imu_rotation_prediction;
       registration_result.imu_rotation_prediction_status = imu_rotation_prediction_status;
     };
@@ -827,7 +969,9 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
     have_previous_scan_stamp,
     used_scan_to_scan_prediction,
     used_imu_rotation_prediction,
-    imu_rotation_prediction_status);
+    imu_rotation_prediction_status,
+    scan_to_scan_reference_age_s,
+    scan_to_scan_prediction_status);
   auto local_map = buildLocalMap(prediction);
   if (!local_map || static_cast<int>(local_map->size()) < min_scan_points_) {
     RCLCPP_WARN_THROTTLE(
@@ -837,8 +981,9 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
       "Local map has too few points; adding scan as a keyframe without registration");
     map_T_base_ = prediction;
     commitWheelPrediction();
+    consecutive_pose_quarantine_count_ = 0;
     recordAcceptedPose();
-    recordTrackingScan(scan_base, map_T_base_);
+    recordTrackingScan(scan_base, map_T_base_, stamp);
     addKeyframe(scan_base, stamp);
     RegistrationResult result;
     result.converged = true;
@@ -853,6 +998,7 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
     attach_prediction_stats(result);
     attach_deskew_stats(result);
     attach_imu_roughness_stats(result);
+    attach_gravity_stats(result);
     last_registration_ = result;
     publishState(stamp);
     publishDiagnostics(stamp, result);
@@ -873,7 +1019,8 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
   const bool local_result_needs_relocalization =
     !result.accepted || local_result_shock_relocalization;
   const Eigen::Isometry3d revisit_probe_pose = result.accepted ?
-    constrainPlanarPose(constrainMotionPriorFallback(result.map_T_base), prediction) :
+    constrainPlanarPose(
+    constrainMotionPriorFallback(result.map_T_base), prediction, gravity_sample) :
     prediction;
   const bool keyframe_revisit_probe =
     result.accepted && shouldAddKeyframe(revisit_probe_pose);
@@ -935,21 +1082,134 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
         attach_prediction_stats(place_result);
         attach_deskew_stats(place_result);
         attach_imu_roughness_stats(place_result);
+        attach_gravity_stats(place_result);
         result = place_result;
       }
     }
   }
   attach_deskew_stats(result);
   attach_imu_roughness_stats(result);
+  attach_gravity_stats(result);
+
+  bool pose_graph_correction_already_applied = false;
+  const bool accepted_place_result =
+    result.place_recognition_accepted && pre_place_recognition_result.has_value();
+  const bool require_pose_graph_validation =
+    place_recognition_require_pose_graph_correction_ || pose_graph_robust_loop_enabled_;
+  const bool validate_place_result = shouldValidateAcceptedPlaceRecognition(
+    result.place_recognition_accepted,
+    pre_place_recognition_result.has_value(),
+    require_pose_graph_validation);
+  if (accepted_place_result) {
+    // Evaluate the same bounded place pose that the normal commit path would use.
+    result.map_T_base = constrainPlanarPose(
+      constrainMotionPriorFallback(result.map_T_base),
+      prediction,
+      gravity_sample);
+    const PlaceRecognitionPoseMetrics place_pose_metrics =
+      computePlaceRecognitionPoseMetrics(prediction, result.map_T_base);
+    result.place_recognition_pose_metrics_evaluated = true;
+    result.place_recognition_pose_metrics_valid = place_pose_metrics.finite;
+    result.place_recognition_prediction_jump_translation_m =
+      place_pose_metrics.prediction_jump_translation_m;
+    result.place_recognition_prediction_jump_rotation_deg =
+      place_pose_metrics.prediction_jump_rotation_deg;
+    result.place_recognition_map_correction_translation_m =
+      place_pose_metrics.map_correction_translation_m;
+    result.place_recognition_map_correction_rotation_deg =
+      place_pose_metrics.map_correction_rotation_deg;
+    const std::string place_candidate_shock_reason = shockQuarantineReason(result);
+    const bool attempt_pose_graph_correction = shouldAttemptPoseGraphCorrection(
+      validate_place_result,
+      !place_candidate_shock_reason.empty());
+    if (attempt_pose_graph_correction) {
+      applyPoseGraphCorrection(stamp, prediction, gravity_sample, result);
+    } else {
+      result.pose_graph_correction_applied = false;
+      result.pose_graph_rejection_reason =
+        "place_candidate_shock_" + place_candidate_shock_reason;
+    }
+    if (result.pose_graph_correction_applied) {
+      local_map = buildLocalMap(map_T_base_);
+      pose_graph_correction_already_applied = true;
+    } else if (shouldRestorePrePlaceResult(
+        accepted_place_result,
+        !place_candidate_shock_reason.empty(),
+        validate_place_result,
+        result.pose_graph_correction_applied))
+    {
+      const RegistrationResult rejected_place_result = result;
+      result = *pre_place_recognition_result;
+      result.place_recognition_attempted = rejected_place_result.place_recognition_attempted;
+      result.place_recognition_skipped = true;
+      result.place_recognition_accepted = false;
+      result.place_recognition_trigger = rejected_place_result.place_recognition_trigger;
+      result.place_recognition_skip_reason = "pose_graph_correction_rejected";
+      result.place_recognition_candidates = rejected_place_result.place_recognition_candidates;
+      result.place_recognition_candidate_index =
+        rejected_place_result.place_recognition_candidate_index;
+      result.place_recognition_descriptor_distance =
+        rejected_place_result.place_recognition_descriptor_distance;
+      result.place_recognition_yaw_offset_deg =
+        rejected_place_result.place_recognition_yaw_offset_deg;
+      result.place_recognition_pose_metrics_evaluated =
+        rejected_place_result.place_recognition_pose_metrics_evaluated;
+      result.place_recognition_pose_metrics_valid =
+        rejected_place_result.place_recognition_pose_metrics_valid;
+      result.place_recognition_prediction_jump_translation_m =
+        rejected_place_result.place_recognition_prediction_jump_translation_m;
+      result.place_recognition_prediction_jump_rotation_deg =
+        rejected_place_result.place_recognition_prediction_jump_rotation_deg;
+      result.place_recognition_map_correction_translation_m =
+        rejected_place_result.place_recognition_map_correction_translation_m;
+      result.place_recognition_map_correction_rotation_deg =
+        rejected_place_result.place_recognition_map_correction_rotation_deg;
+      result.pose_graph_correction_keyframes =
+        rejected_place_result.pose_graph_correction_keyframes;
+      result.pose_graph_optimization_iterations =
+        rejected_place_result.pose_graph_optimization_iterations;
+      result.pose_graph_edges = rejected_place_result.pose_graph_edges;
+      result.pose_graph_loop_edges = rejected_place_result.pose_graph_loop_edges;
+      result.pose_graph_robust_loop_edges_downweighted =
+        rejected_place_result.pose_graph_robust_loop_edges_downweighted;
+      result.pose_graph_residual_before = rejected_place_result.pose_graph_residual_before;
+      result.pose_graph_residual_after = rejected_place_result.pose_graph_residual_after;
+      result.pose_graph_robust_objective_before =
+        rejected_place_result.pose_graph_robust_objective_before;
+      result.pose_graph_robust_objective_after =
+        rejected_place_result.pose_graph_robust_objective_after;
+      result.pose_graph_min_loop_robust_weight =
+        rejected_place_result.pose_graph_min_loop_robust_weight;
+      result.pose_graph_new_loop_robust_weight =
+        rejected_place_result.pose_graph_new_loop_robust_weight;
+      result.pose_graph_max_update_translation_m =
+        rejected_place_result.pose_graph_max_update_translation_m;
+      result.pose_graph_max_update_rotation_deg =
+        rejected_place_result.pose_graph_max_update_rotation_deg;
+      result.pose_graph_new_loop_rejected =
+        rejected_place_result.pose_graph_new_loop_rejected;
+      result.pose_graph_rejection_reason =
+        rejected_place_result.pose_graph_rejection_reason;
+      if (!result.pose_graph_rejection_reason.empty()) {
+        result.place_recognition_skip_reason =
+          "pose_graph_" + result.pose_graph_rejection_reason;
+      }
+      attach_deskew_stats(result);
+      attach_imu_roughness_stats(result);
+      attach_gravity_stats(result);
+    }
+  }
   last_registration_ = result;
 
   if (!result.accepted) {
+    consecutive_pose_quarantine_count_ = 0;
     if (use_scan_to_scan_fallback_ && used_scan_to_scan_prediction) {
       RCLCPP_WARN(
         get_logger(),
         "Scan-to-map rejected (%s); accepting scan-to-scan fallback pose",
         result.rejection_reason.c_str());
-      map_T_base_ = constrainPlanarPose(constrainMotionPriorFallback(prediction), map_T_base_);
+      map_T_base_ = constrainPlanarPose(
+        constrainMotionPriorFallback(prediction), map_T_base_, gravity_sample);
       commitWheelPrediction();
       result.accepted = true;
       result.converged = true;
@@ -958,8 +1218,9 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
       result.shock_quarantine_reason = shockQuarantineReason(result);
       result.shock_quarantined = !result.shock_quarantine_reason.empty();
       if (!result.shock_quarantined) {
+        consecutive_pose_quarantine_count_ = 0;
         recordAcceptedPose();
-        recordTrackingScan(scan_base, map_T_base_);
+        recordTrackingScan(scan_base, map_T_base_, stamp);
       }
       last_registration_ = result;
       latest_local_map_ = local_map;
@@ -983,7 +1244,8 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
         get_logger(),
         "Scan-to-map rejected (%s); accepting motion-prior fallback pose",
         result.rejection_reason.c_str());
-      map_T_base_ = constrainPlanarPose(constrainMotionPriorFallback(prediction), map_T_base_);
+      map_T_base_ = constrainPlanarPose(
+        constrainMotionPriorFallback(prediction), map_T_base_, gravity_sample);
       commitWheelPrediction();
       result.accepted = true;
       result.converged = true;
@@ -992,8 +1254,9 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
       result.shock_quarantine_reason = shockQuarantineReason(result);
       result.shock_quarantined = !result.shock_quarantine_reason.empty();
       if (!result.shock_quarantined) {
+        consecutive_pose_quarantine_count_ = 0;
         recordAcceptedPose();
-        recordTrackingScan(scan_base, map_T_base_);
+        recordTrackingScan(scan_base, map_T_base_, stamp);
       }
       last_registration_ = result;
       latest_local_map_ = local_map;
@@ -1026,74 +1289,31 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
       result.correction_translation_m,
       result.correction_rotation_deg);
     if (!quarantine_keyframes_on_shock_) {
-      recordTrackingScan(scan_base, prediction);
+      recordTrackingScan(scan_base, prediction, stamp);
     }
     publishDiagnostics(stamp, result);
     return;
   }
 
-  bool pose_graph_correction_already_applied = false;
-  if (result.place_recognition_accepted && pose_graph_correction_enabled_ &&
-    place_recognition_require_pose_graph_correction_ &&
-    pre_place_recognition_result.has_value() &&
-    pre_place_recognition_result->accepted)
-  {
-    applyPoseGraphCorrection(stamp, prediction, result);
-    if (result.pose_graph_correction_applied) {
-      local_map = buildLocalMap(map_T_base_);
-      pose_graph_correction_already_applied = true;
-    } else {
-      const RegistrationResult rejected_place_result = result;
-      result = *pre_place_recognition_result;
-      result.place_recognition_attempted = rejected_place_result.place_recognition_attempted;
-      result.place_recognition_skipped = true;
-      result.place_recognition_accepted = false;
-      result.place_recognition_trigger = rejected_place_result.place_recognition_trigger;
-      result.place_recognition_skip_reason = "pose_graph_correction_rejected";
-      result.place_recognition_candidates = rejected_place_result.place_recognition_candidates;
-      result.place_recognition_candidate_index =
-        rejected_place_result.place_recognition_candidate_index;
-      result.place_recognition_descriptor_distance =
-        rejected_place_result.place_recognition_descriptor_distance;
-      result.place_recognition_yaw_offset_deg =
-        rejected_place_result.place_recognition_yaw_offset_deg;
-      result.pose_graph_correction_keyframes =
-        rejected_place_result.pose_graph_correction_keyframes;
-      result.pose_graph_optimization_iterations =
-        rejected_place_result.pose_graph_optimization_iterations;
-      result.pose_graph_edges = rejected_place_result.pose_graph_edges;
-      result.pose_graph_loop_edges = rejected_place_result.pose_graph_loop_edges;
-      result.pose_graph_robust_loop_edges_downweighted =
-        rejected_place_result.pose_graph_robust_loop_edges_downweighted;
-      result.pose_graph_residual_before = rejected_place_result.pose_graph_residual_before;
-      result.pose_graph_residual_after = rejected_place_result.pose_graph_residual_after;
-      result.pose_graph_robust_objective_before =
-        rejected_place_result.pose_graph_robust_objective_before;
-      result.pose_graph_robust_objective_after =
-        rejected_place_result.pose_graph_robust_objective_after;
-      result.pose_graph_min_loop_robust_weight =
-        rejected_place_result.pose_graph_min_loop_robust_weight;
-      result.pose_graph_new_loop_robust_weight =
-        rejected_place_result.pose_graph_new_loop_robust_weight;
-      result.pose_graph_max_update_translation_m =
-        rejected_place_result.pose_graph_max_update_translation_m;
-      result.pose_graph_max_update_rotation_deg =
-        rejected_place_result.pose_graph_max_update_rotation_deg;
-      attach_deskew_stats(result);
-      attach_imu_roughness_stats(result);
-    }
-  }
-
   result.shock_quarantine_reason = shockQuarantineReason(result);
   result.shock_quarantined = !result.shock_quarantine_reason.empty();
   if (result.shock_quarantined && quarantine_pose_on_shock_) {
-    map_T_base_ = constrainPlanarPose(constrainMotionPriorFallback(prediction), map_T_base_);
+    map_T_base_ = constrainPlanarPose(
+      constrainMotionPriorFallback(prediction), map_T_base_, gravity_sample);
     commitWheelPrediction();
     result.pose_quarantined = true;
     result.map_T_base = map_T_base_;
     result.rejection_reason = "shock_pose_quarantine";
-    if (record_tracking_scan_on_pose_quarantine_) {
-      recordTrackingScan(scan_base, map_T_base_);
+    ++consecutive_pose_quarantine_count_;
+    result.consecutive_pose_quarantine_count = consecutive_pose_quarantine_count_;
+    const int tracking_reset_interval =
+      std::max(0, pose_quarantine_tracking_reset_interval_);
+    const bool periodic_tracking_reset =
+      tracking_reset_interval > 0 &&
+      consecutive_pose_quarantine_count_ % tracking_reset_interval == 0;
+    if (record_tracking_scan_on_pose_quarantine_ || periodic_tracking_reset) {
+      recordTrackingScan(scan_base, map_T_base_, stamp);
+      result.pose_quarantine_tracking_reset = true;
     }
     latest_local_map_ = local_map;
     last_registration_ = result;
@@ -1101,18 +1321,21 @@ void ScanToMapIcp::processCloud(const sensor_msgs::msg::PointCloud2::SharedPtr &
     publishDiagnostics(stamp, result);
     return;
   }
+  consecutive_pose_quarantine_count_ = 0;
   if (!pose_graph_correction_already_applied) {
-    map_T_base_ = constrainPlanarPose(constrainMotionPriorFallback(result.map_T_base), prediction);
+    map_T_base_ = constrainPlanarPose(
+      constrainMotionPriorFallback(result.map_T_base), prediction, gravity_sample);
     result.map_T_base = map_T_base_;
   }
   if (result.place_recognition_accepted && !pose_graph_correction_already_applied) {
-    applyPoseGraphCorrection(stamp, prediction, result);
+    applyPoseGraphCorrection(stamp, prediction, gravity_sample, result);
     local_map = buildLocalMap(map_T_base_);
   }
   commitWheelPrediction();
   if (!result.shock_quarantined) {
+    consecutive_pose_quarantine_count_ = 0;
     recordAcceptedPose();
-    recordTrackingScan(scan_base, map_T_base_);
+    recordTrackingScan(scan_base, map_T_base_, stamp);
   }
   latest_local_map_ = local_map;
 
@@ -1946,11 +2169,41 @@ Eigen::Isometry3d ScanToMapIcp::constrainMotionPriorFallback(
   return constrained;
 }
 
+std::optional<ScanToMapIcp::GravitySample> ScanToMapIcp::gravitySampleAt(
+  const rclcpp::Time & stamp,
+  bool & stale) const
+{
+  stale = false;
+  if (!gravity_roll_pitch_constraint_enabled_) {
+    return std::nullopt;
+  }
+
+  std::lock_guard<std::mutex> lock(imu_mutex_);
+  for (auto iterator = gravity_buffer_.rbegin(); iterator != gravity_buffer_.rend(); ++iterator) {
+    if (iterator->stamp <= stamp && iterator->accel_base.allFinite() &&
+      iterator->accel_base.norm() > 1.0e-6)
+    {
+      const double age_s = (stamp - iterator->stamp).seconds();
+      const double max_age_s = std::max(0.0, gravity_accel_max_age_s_);
+      if (max_age_s > 0.0 && age_s > max_age_s) {
+        stale = true;
+        return std::nullopt;
+      }
+      return *iterator;
+    }
+  }
+  return std::nullopt;
+}
+
 Eigen::Isometry3d ScanToMapIcp::constrainPlanarPose(
   const Eigen::Isometry3d & candidate,
-  const Eigen::Isometry3d & reference) const
+  const Eigen::Isometry3d & reference,
+  const std::optional<GravitySample> & gravity_sample) const
 {
   if (!planar_pose_constraint_enabled_ && !gravity_roll_pitch_constraint_enabled_) {
+    return candidate;
+  }
+  if (!planar_pose_constraint_enabled_ && !gravity_sample.has_value()) {
     return candidate;
   }
 
@@ -1966,16 +2219,10 @@ Eigen::Isometry3d ScanToMapIcp::constrainPlanarPose(
   }
   const double yaw = yawFromIsometry(candidate);
 
-  Eigen::Vector3d gravity_accel = Eigen::Vector3d::UnitZ();
-  bool have_gravity = false;
-  if (gravity_roll_pitch_constraint_enabled_) {
-    std::lock_guard<std::mutex> lock(imu_mutex_);
-    have_gravity = have_gravity_accel_base_ && gravity_accel_base_.allFinite() &&
-      gravity_accel_base_.norm() > 1.0e-6;
-    if (have_gravity) {
-      gravity_accel = gravity_accel_base_.normalized();
-    }
-  }
+  const bool have_gravity = gravity_sample.has_value();
+  const Eigen::Vector3d gravity_accel = have_gravity ?
+    gravity_sample->accel_base.normalized() :
+    Eigen::Vector3d::UnitZ();
 
   double roll = 0.0;
   double pitch = 0.0;
@@ -2000,34 +2247,85 @@ Eigen::Isometry3d ScanToMapIcp::predictWithMotionPriors(
   const bool have_previous_scan_stamp,
   bool & used_scan_to_scan,
   bool & used_imu_rotation_prediction,
-  std::string & imu_rotation_prediction_status)
+  std::string & imu_rotation_prediction_status,
+  double & scan_to_scan_reference_age_s,
+  std::string & scan_to_scan_prediction_status)
 {
   used_scan_to_scan = false;
   used_imu_rotation_prediction = false;
   imu_rotation_prediction_status = imu_rotation_prediction_enabled_ ? "unavailable" : "disabled";
+  scan_to_scan_reference_age_s = 0.0;
+  scan_to_scan_prediction_status = use_scan_to_scan_prediction_ ? "unavailable" : "disabled";
 
   Eigen::Isometry3d fallback = predictWithWheelOdom();
   Eigen::Isometry3d scan_to_scan_guess = Eigen::Isometry3d::Identity();
+  std::optional<Eigen::Quaterniond> previous_scan_imu_delta;
   if (imu_rotation_prediction_enabled_) {
-    auto imu_delta = integrateImuRotationDelta(
-      previous_scan_stamp,
-      current_scan_stamp,
-      imu_rotation_prediction_status);
-    if (imu_delta) {
-      const Eigen::Matrix3d imu_rotation = imu_delta->normalized().toRotationMatrix();
+    if (have_previous_scan_stamp) {
+      previous_scan_imu_delta = integrateImuRotationDelta(
+        previous_scan_stamp,
+        current_scan_stamp,
+        imu_rotation_prediction_status);
+    } else {
+      imu_rotation_prediction_status = "missing_previous_scan_stamp";
+    }
+    if (previous_scan_imu_delta) {
+      const Eigen::Matrix3d imu_rotation =
+        previous_scan_imu_delta->normalized().toRotationMatrix();
       fallback.linear() = map_T_base_.linear() * imu_rotation;
-      scan_to_scan_guess.linear() = imu_rotation;
       used_imu_rotation_prediction = true;
       imu_rotation_prediction_status = "applied";
-    } else if (!have_previous_scan_stamp) {
-      imu_rotation_prediction_status = "missing_previous_scan_stamp";
     }
   }
 
   if (!use_scan_to_scan_prediction_ || !have_previous_tracking_scan_ ||
     !previous_tracking_scan_base_)
   {
+    if (use_scan_to_scan_prediction_) {
+      scan_to_scan_prediction_status = "missing_tracking_reference";
+    }
     return fallback;
+  }
+
+  scan_to_scan_reference_age_s =
+    (current_scan_stamp - previous_tracking_scan_stamp_).seconds();
+  if (!std::isfinite(scan_to_scan_reference_age_s) ||
+    scan_to_scan_reference_age_s <= 0.0)
+  {
+    scan_to_scan_prediction_status = "invalid_tracking_reference_age";
+    return fallback;
+  }
+  const double max_reference_age_s = std::max(0.0, scan_to_scan_max_reference_age_s_);
+  if (max_reference_age_s > 0.0 &&
+    scan_to_scan_reference_age_s > max_reference_age_s)
+  {
+    scan_to_scan_prediction_status = "stale_tracking_reference";
+    return fallback;
+  }
+
+  if (imu_rotation_prediction_enabled_) {
+    const bool tracking_reference_is_previous_scan =
+      have_previous_scan_stamp &&
+      std::abs((previous_tracking_scan_stamp_ - previous_scan_stamp).seconds()) <= 1.0e-6;
+    std::optional<Eigen::Quaterniond> tracking_imu_delta;
+    std::string tracking_imu_status{"unavailable"};
+    if (tracking_reference_is_previous_scan) {
+      tracking_imu_delta = previous_scan_imu_delta;
+      tracking_imu_status = imu_rotation_prediction_status;
+    } else {
+      tracking_imu_delta = integrateImuRotationDelta(
+        previous_tracking_scan_stamp_,
+        current_scan_stamp,
+        tracking_imu_status);
+    }
+    if (tracking_imu_delta) {
+      scan_to_scan_guess.linear() =
+        tracking_imu_delta->normalized().toRotationMatrix();
+      used_imu_rotation_prediction = true;
+      imu_rotation_prediction_status = "applied";
+    } else if (!previous_scan_imu_delta) {
+      imu_rotation_prediction_status = tracking_imu_status;
+    }
   }
 
   auto relative = registerScanToMap(
@@ -2035,10 +2333,12 @@ Eigen::Isometry3d ScanToMapIcp::predictWithMotionPriors(
     previous_tracking_scan_base_,
     scan_to_scan_guess);
   if (!relative.accepted) {
+    scan_to_scan_prediction_status = "registration_rejected";
     return fallback;
   }
 
   used_scan_to_scan = true;
+  scan_to_scan_prediction_status = "applied";
   return previous_tracking_pose_ * relative.map_T_base;
 }
 
@@ -2170,10 +2470,12 @@ void ScanToMapIcp::recordAcceptedPose()
 
 void ScanToMapIcp::recordTrackingScan(
   const CloudConstPtr & scan_base,
-  const Eigen::Isometry3d & pose)
+  const Eigen::Isometry3d & pose,
+  const rclcpp::Time & stamp)
 {
   previous_tracking_scan_base_ = std::make_shared<CloudT>(*scan_base);
   previous_tracking_pose_ = pose;
+  previous_tracking_scan_stamp_ = stamp;
   have_previous_tracking_scan_ = true;
 }
 
@@ -2480,7 +2782,7 @@ void ScanToMapIcp::initializeFromFirstScan(
   last_registration_.map_T_base = map_T_base_;
   last_registration_.rejection_reason = "initialized";
   recordAcceptedPose();
-  recordTrackingScan(scan_base, map_T_base_);
+  recordTrackingScan(scan_base, map_T_base_, stamp);
   if (use_wheel_prediction_) {
     std::lock_guard<std::mutex> lock(wheel_mutex_);
     if (have_latest_wheel_odom_) {
@@ -2554,6 +2856,53 @@ bool ScanToMapIcp::shouldAddKeyframe(const Eigen::Isometry3d & pose) const
 std::string ScanToMapIcp::shockQuarantineReason(const RegistrationResult & result) const
 {
   if (!quarantine_keyframes_on_shock_) {
+    return "";
+  }
+
+  if (result.place_recognition_accepted &&
+    result.place_recognition_pose_metrics_evaluated)
+  {
+    const PlaceRecognitionPoseMetrics place_pose_metrics{
+      result.place_recognition_pose_metrics_valid,
+      result.place_recognition_prediction_jump_translation_m,
+      result.place_recognition_prediction_jump_rotation_deg,
+      result.place_recognition_map_correction_translation_m,
+      result.place_recognition_map_correction_rotation_deg};
+    if (!place_pose_metrics.finite) {
+      return "place_pose_metrics_invalid";
+    }
+
+    const double max_alignment_translation = std::max(
+      0.0, keyframe_quarantine_correction_translation_m_);
+    if (max_alignment_translation > 0.0 &&
+      result.correction_translation_m > max_alignment_translation)
+    {
+      return "place_alignment_correction_translation";
+    }
+    const double max_alignment_rotation = std::max(
+      0.0, keyframe_quarantine_correction_rotation_deg_);
+    if (max_alignment_rotation > 0.0 &&
+      result.correction_rotation_deg > max_alignment_rotation)
+    {
+      return "place_alignment_correction_rotation";
+    }
+
+    const double max_prediction_translation = std::max(
+      0.0, place_recognition_max_pose_jump_m_);
+    const double max_prediction_rotation = std::max(
+      0.0, place_recognition_max_pose_jump_rotation_deg_);
+    if (!placePredictionJumpWithinLimits(
+        place_pose_metrics,
+        max_prediction_translation,
+        max_prediction_rotation))
+    {
+      if (max_prediction_translation > 0.0 &&
+        place_pose_metrics.prediction_jump_translation_m > max_prediction_translation)
+      {
+        return "place_prediction_jump_translation";
+      }
+      return "place_prediction_jump_rotation";
+    }
     return "";
   }
 
@@ -2920,30 +3269,51 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
   loop_edge.loop_closure = true;
   pose_graph_edges_.push_back(loop_edge);
 
-  stats.edges = static_cast<int>(pose_graph_edges_.size());
-  stats.loop_edges = 0;
-  for (const auto & edge : pose_graph_edges_) {
-    if (edge.loop_closure) {
-      ++stats.loop_edges;
-    }
-  }
-
   std::vector<Eigen::Isometry3d> poses = previous_keyframe_poses;
   std::vector<Eigen::Isometry3d> best_poses = poses;
+  auto refresh_retained_loop_diagnostics = [&]() {
+      stats.edges = static_cast<int>(pose_graph_edges_.size());
+      stats.loop_edges = 0;
+      stats.robust_loop_edges_downweighted = 0;
+      stats.min_loop_robust_weight = 1.0;
+      for (const auto & edge : pose_graph_edges_) {
+        if (!edge.loop_closure) {
+          continue;
+        }
+        ++stats.loop_edges;
+        const double robust_weight = poseGraphLoopRobustWeight(
+          edge,
+          poseGraphEdgeSquaredError(edge, previous_keyframe_poses));
+        stats.min_loop_robust_weight = std::min(
+          stats.min_loop_robust_weight,
+          robust_weight);
+        if (robust_weight < 0.999) {
+          ++stats.robust_loop_edges_downweighted;
+        }
+      }
+    };
+  auto reject_new_loop = [&](const std::string & reason) {
+      stats.new_loop_rejected = true;
+      stats.rejection_reason = reason;
+      pose_graph_edges_.pop_back();
+      refresh_retained_loop_diagnostics();
+    };
+  refresh_retained_loop_diagnostics();
+
   stats.new_loop_robust_weight = poseGraphLoopRobustWeight(
     loop_edge,
     poseGraphEdgeSquaredError(loop_edge, poses));
-  for (const auto & edge : pose_graph_edges_) {
-    if (!edge.loop_closure) {
-      continue;
-    }
-    const double robust_weight = poseGraphLoopRobustWeight(
-      edge,
-      poseGraphEdgeSquaredError(edge, poses));
-    stats.min_loop_robust_weight = std::min(stats.min_loop_robust_weight, robust_weight);
-    if (robust_weight < 0.999) {
-      ++stats.robust_loop_edges_downweighted;
-    }
+  const double min_new_loop_robust_weight =
+    std::clamp(pose_graph_min_new_loop_robust_weight_, 0.0, 1.0);
+  if (pose_graph_robust_loop_enabled_ &&
+    stats.new_loop_robust_weight < min_new_loop_robust_weight)
+  {
+    stats.residual_before = poseGraphResidual(poses, false);
+    stats.robust_objective_before = poseGraphResidual(poses, true);
+    reject_new_loop("new_loop_robust_weight");
+    stats.residual_after = poseGraphResidual(poses, false);
+    stats.robust_objective_after = poseGraphResidual(poses, true);
+    return stats;
   }
   stats.residual_before = poseGraphResidual(poses, false);
   stats.robust_objective_before = poseGraphResidual(poses, true);
@@ -3058,25 +3428,19 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
     !std::isfinite(stats.robust_objective_after) ||
     stats.robust_objective_after >= stats.robust_objective_before)
   {
-    pose_graph_edges_.pop_back();
-    stats.edges = static_cast<int>(pose_graph_edges_.size());
-    --stats.loop_edges;
+    reject_new_loop("objective_not_improved");
     return stats;
   }
   const double max_residual_after = std::max(0.0, pose_graph_max_residual_after_);
   if (max_residual_after > 0.0 && stats.residual_after > max_residual_after) {
-    pose_graph_edges_.pop_back();
-    stats.edges = static_cast<int>(pose_graph_edges_.size());
-    --stats.loop_edges;
+    reject_new_loop("residual_after");
     return stats;
   }
   const double max_residual_ratio = std::max(0.0, pose_graph_max_residual_ratio_);
   if (max_residual_ratio > 0.0 && stats.residual_before > 1.0e-6 &&
     stats.residual_after / stats.residual_before > max_residual_ratio)
   {
-    pose_graph_edges_.pop_back();
-    stats.edges = static_cast<int>(pose_graph_edges_.size());
-    --stats.loop_edges;
+    reject_new_loop("residual_ratio");
     return stats;
   }
 
@@ -3139,9 +3503,12 @@ void ScanToMapIcp::updatePathFromKeyframeCorrections(
 void ScanToMapIcp::applyPoseGraphCorrection(
   const rclcpp::Time & stamp,
   const Eigen::Isometry3d & reference_pose,
+  const std::optional<GravitySample> & gravity_sample,
   RegistrationResult & result)
 {
   result.pose_graph_correction_applied = false;
+  result.pose_graph_new_loop_rejected = false;
+  result.pose_graph_rejection_reason.clear();
   result.pose_graph_correction_keyframes = 0;
   result.pose_graph_correction_translation_m = 0.0;
   result.pose_graph_correction_rotation_deg = 0.0;
@@ -3164,6 +3531,7 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_max_update_rotation_deg = 0.0;
 
   if (!pose_graph_correction_enabled_ || !result.place_recognition_accepted) {
+    result.pose_graph_rejection_reason = "disabled_or_no_place_match";
     return;
   }
   const double min_interval_s = std::max(0.0, pose_graph_correction_min_interval_s_);
@@ -3171,6 +3539,7 @@ void ScanToMapIcp::applyPoseGraphCorrection(
     min_interval_s > 0.0 &&
     (stamp - last_pose_graph_correction_stamp_).seconds() < min_interval_s)
   {
+    result.pose_graph_rejection_reason = "minimum_interval";
     return;
   }
   const int anchor_index = result.place_recognition_candidate_index;
@@ -3178,6 +3547,7 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   if (anchor_index < 0 || anchor_index >= keyframe_count ||
     keyframe_count < std::max(2, pose_graph_correction_min_keyframes_))
   {
+    result.pose_graph_rejection_reason = "invalid_anchor_or_keyframe_count";
     return;
   }
 
@@ -3197,15 +3567,18 @@ void ScanToMapIcp::applyPoseGraphCorrection(
 
   const double max_translation = std::max(0.0, pose_graph_correction_max_translation_m_);
   if (max_translation > 0.0 && correction_translation_m > max_translation) {
+    result.pose_graph_rejection_reason = "correction_translation";
     return;
   }
   const double max_rotation = std::max(0.0, pose_graph_correction_max_rotation_deg_);
   if (max_rotation > 0.0 && correction_rotation_deg > max_rotation) {
+    result.pose_graph_rejection_reason = "correction_rotation";
     return;
   }
 
   const int last_index = keyframe_count - 1;
   if (anchor_index >= last_index) {
+    result.pose_graph_rejection_reason = "anchor_not_historical";
     return;
   }
 
@@ -3225,6 +3598,7 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   if (max_loop_residual_before > 0.0 &&
     prospective_loop_residual > max_loop_residual_before)
   {
+    result.pose_graph_rejection_reason = "loop_residual_before";
     return;
   }
 
@@ -3250,6 +3624,8 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_new_loop_robust_weight = stats.new_loop_robust_weight;
   result.pose_graph_max_update_translation_m = stats.max_update_translation_m;
   result.pose_graph_max_update_rotation_deg = stats.max_update_rotation_deg;
+  result.pose_graph_new_loop_rejected = stats.new_loop_rejected;
+  result.pose_graph_rejection_reason = stats.rejection_reason;
 
   if (!stats.applied) {
     return;
@@ -3260,7 +3636,8 @@ void ScanToMapIcp::applyPoseGraphCorrection(
     normalizeIsometry(keyframes_.back().map_T_base * previous_keyframe_poses.back().inverse());
   map_T_base_ = constrainPlanarPose(
     normalizeIsometry(latest_keyframe_correction * reference_pose),
-    reference_pose);
+    reference_pose,
+    gravity_sample);
   result.map_T_base = map_T_base_;
   last_keyframe_pose_ = keyframes_.back().map_T_base;
   rebuildGlobalMap();
@@ -3362,12 +3739,6 @@ void ScanToMapIcp::publishDiagnostics(
     diagnostic_msgs::msg::DiagnosticStatus::WARN;
   status.message = result.accepted ? "registration accepted" : "registration rejected";
 
-  rclcpp::Time latest_imu_stamp;
-  {
-    std::lock_guard<std::mutex> lock(imu_mutex_);
-    latest_imu_stamp = latest_imu_stamp_;
-  }
-
   rclcpp::Time latest_wheel_stamp;
   {
     std::lock_guard<std::mutex> lock(wheel_mutex_);
@@ -3376,10 +3747,22 @@ void ScanToMapIcp::publishDiagnostics(
 
   bool have_gravity_accel = false;
   Eigen::Vector3d gravity_accel = Eigen::Vector3d::UnitZ();
+  double gravity_filter_alpha = 0.0;
+  int imu_duplicate_dropped_count = 0;
+  int imu_out_of_order_dropped_count = 0;
+  int imu_rewind_dropped_count = 0;
+  int imu_timestamp_reset_count = 0;
+  rclcpp::Time latest_imu_stamp;
   {
     std::lock_guard<std::mutex> lock(imu_mutex_);
+    latest_imu_stamp = latest_imu_stamp_;
     have_gravity_accel = have_gravity_accel_base_;
     gravity_accel = gravity_accel_base_;
+    gravity_filter_alpha = latest_gravity_filter_alpha_;
+    imu_duplicate_dropped_count = imu_duplicate_dropped_count_;
+    imu_out_of_order_dropped_count = imu_out_of_order_dropped_count_;
+    imu_rewind_dropped_count = imu_rewind_dropped_count_;
+    imu_timestamp_reset_count = imu_timestamp_reset_count_;
   }
   const double gravity_accel_norm = gravity_accel.norm();
   double gravity_roll_deg = 0.0;
@@ -3494,10 +3877,25 @@ void ScanToMapIcp::publishDiagnostics(
     toString(result.imu_roughness_time_since_event_s));
   add_value("shock_quarantined", result.shock_quarantined ? "true" : "false");
   add_value("shock_quarantine_reason", result.shock_quarantine_reason);
+  add_value(
+    "quarantine_keyframes_on_shock",
+    quarantine_keyframes_on_shock_ ? "enabled" : "disabled");
+  add_value(
+    "quarantine_pose_on_shock",
+    quarantine_pose_on_shock_ ? "enabled" : "disabled");
   add_value("pose_quarantined", result.pose_quarantined ? "true" : "false");
+  add_value(
+    "consecutive_pose_quarantine_count",
+    toString(result.consecutive_pose_quarantine_count));
+  add_value(
+    "pose_quarantine_tracking_reset",
+    result.pose_quarantine_tracking_reset ? "true" : "false");
   add_value(
     "record_tracking_scan_on_pose_quarantine",
     record_tracking_scan_on_pose_quarantine_ ? "enabled" : "disabled");
+  add_value(
+    "pose_quarantine_tracking_reset_interval",
+    toString(pose_quarantine_tracking_reset_interval_));
   add_value("keyframe_added", result.keyframe_added ? "true" : "false");
   add_value("keyframe_quarantined", result.keyframe_quarantined ? "true" : "false");
   add_value("keyframe_quarantine_reason", result.keyframe_quarantine_reason);
@@ -3510,6 +3908,10 @@ void ScanToMapIcp::publishDiagnostics(
   add_value(
     "place_recognition_require_pose_graph_correction",
     place_recognition_require_pose_graph_correction_ ? "enabled" : "disabled");
+  add_value(
+    "place_recognition_pose_graph_validation_effective",
+    (place_recognition_require_pose_graph_correction_ || pose_graph_robust_loop_enabled_) ?
+    "enabled" : "disabled");
   add_value(
     "place_recognition_attempted",
     result.place_recognition_attempted ? "true" : "false");
@@ -3534,6 +3936,24 @@ void ScanToMapIcp::publishDiagnostics(
     "place_recognition_yaw_offset_deg",
     toString(result.place_recognition_yaw_offset_deg));
   add_value(
+    "place_recognition_pose_metrics_evaluated",
+    result.place_recognition_pose_metrics_evaluated ? "true" : "false");
+  add_value(
+    "place_recognition_pose_metrics_valid",
+    result.place_recognition_pose_metrics_valid ? "true" : "false");
+  add_value(
+    "place_recognition_prediction_jump_translation_m",
+    toString(result.place_recognition_prediction_jump_translation_m));
+  add_value(
+    "place_recognition_prediction_jump_rotation_deg",
+    toString(result.place_recognition_prediction_jump_rotation_deg));
+  add_value(
+    "place_recognition_map_correction_translation_m",
+    toString(result.place_recognition_map_correction_translation_m));
+  add_value(
+    "place_recognition_map_correction_rotation_deg",
+    toString(result.place_recognition_map_correction_rotation_deg));
+  add_value(
     "pose_graph_correction",
     pose_graph_correction_enabled_ ? "enabled" : "disabled");
   add_value(
@@ -3544,22 +3964,42 @@ void ScanToMapIcp::publishDiagnostics(
     pose_graph_robust_loop_enabled_ ? "enabled" : "disabled");
   add_value("pose_graph_loop_cauchy_scale", toString(pose_graph_loop_cauchy_scale_));
   add_value(
+    "pose_graph_min_new_loop_robust_weight",
+    toString(pose_graph_min_new_loop_robust_weight_));
+  add_value(
     "planar_pose_constraint",
     planar_pose_constraint_enabled_ ? "enabled" : "disabled");
   add_value("planar_pose_max_z_correction_m", toString(planar_pose_max_z_correction_m_));
   add_value(
     "gravity_roll_pitch_constraint",
     gravity_roll_pitch_constraint_enabled_ ? "enabled" : "disabled");
-  add_value("gravity_accel_available", have_gravity_accel ? "true" : "false");
-  add_value("gravity_accel_norm_mps2", toString(gravity_accel_norm));
-  add_value("gravity_roll_deg", toString(gravity_roll_deg));
-  add_value("gravity_pitch_deg", toString(gravity_pitch_deg));
+  add_value("gravity_constraint_status", result.gravity_constraint_status);
+  add_value("gravity_accel_available", result.gravity_accel_used ? "true" : "false");
+  add_value("gravity_accel_age_s", toString(result.gravity_accel_age_s));
+  add_value("gravity_accel_norm_mps2", toString(result.gravity_accel_norm_mps2));
+  add_value(
+    "gravity_accel_filter_mode",
+    gravity_accel_time_constant_s_ > 0.0 ? "time_constant" : "legacy_alpha");
+  add_value("gravity_accel_time_constant_s", toString(gravity_accel_time_constant_s_));
+  add_value("gravity_accel_max_age_s", toString(gravity_accel_max_age_s_));
+  add_value("gravity_accel_effective_alpha", toString(result.gravity_filter_alpha));
+  add_value("gravity_roll_deg", toString(result.gravity_roll_deg));
+  add_value("gravity_pitch_deg", toString(result.gravity_pitch_deg));
+  add_value("latest_gravity_accel_available", have_gravity_accel ? "true" : "false");
+  add_value("latest_gravity_accel_norm_mps2", toString(gravity_accel_norm));
+  add_value("latest_gravity_accel_effective_alpha", toString(gravity_filter_alpha));
+  add_value("latest_gravity_roll_deg", toString(gravity_roll_deg));
+  add_value("latest_gravity_pitch_deg", toString(gravity_pitch_deg));
   add_value("map_z_filter", map_z_filter_enabled_ ? "enabled" : "disabled");
   add_value("map_z_filter_min_m", toString(map_z_filter_min_m_));
   add_value("map_z_filter_max_m", toString(map_z_filter_max_m_));
   add_value(
     "pose_graph_correction_applied",
     result.pose_graph_correction_applied ? "true" : "false");
+  add_value(
+    "pose_graph_new_loop_rejected",
+    result.pose_graph_new_loop_rejected ? "true" : "false");
+  add_value("pose_graph_rejection_reason", result.pose_graph_rejection_reason);
   add_value(
     "pose_graph_correction_keyframes",
     toString(result.pose_graph_correction_keyframes));
@@ -3612,6 +4052,16 @@ void ScanToMapIcp::publishDiagnostics(
     result.imu_rotation_prediction_used ? "true" : "false");
   add_value("imu_rotation_prediction_status", result.imu_rotation_prediction_status);
   add_value("scan_to_scan_prediction", use_scan_to_scan_prediction_ ? "enabled" : "disabled");
+  add_value(
+    "scan_to_scan_prediction_used",
+    result.scan_to_scan_prediction_used ? "true" : "false");
+  add_value("scan_to_scan_prediction_status", result.scan_to_scan_prediction_status);
+  add_value(
+    "scan_to_scan_reference_age_s",
+    toString(result.scan_to_scan_reference_age_s));
+  add_value(
+    "scan_to_scan_max_reference_age_s",
+    toString(scan_to_scan_max_reference_age_s_));
   add_value("scan_to_scan_fallback", use_scan_to_scan_fallback_ ? "enabled" : "disabled");
   add_value(
     "scan_to_scan_fallback_keyframes",
@@ -3621,7 +4071,24 @@ void ScanToMapIcp::publishDiagnostics(
     "motion_prior_fallback_keyframes",
     add_motion_prior_fallback_keyframes_ ? "enabled" : "disabled");
   add_value("latest_imu_stamp_ns", toString(latest_imu_stamp.nanoseconds()));
+  add_value("imu_watermark_topic", imu_watermark_topic_);
   add_value("imu_subscription_depth", toString(imu_subscription_depth_));
+  add_value("imu_reorder_tolerance_s", toString(imu_reorder_tolerance_s_));
+  add_value(
+    "imu_timestamp_reset_threshold_s",
+    toString(imu_timestamp_reset_threshold_s_));
+  add_value("imu_duplicate_dropped_count", toString(imu_duplicate_dropped_count));
+  add_value("imu_out_of_order_dropped_count", toString(imu_out_of_order_dropped_count));
+  add_value("imu_rewind_dropped_count", toString(imu_rewind_dropped_count));
+  add_value("imu_timestamp_reset_count", toString(imu_timestamp_reset_count));
+  add_value(
+    "imu_timestamp_reset_policy",
+    "detect_and_drop_without_partial_state_reset");
+  add_value(
+    "cloud_subscription_reliability",
+    cloud_subscription_reliable_ ? "reliable" : "best_effort");
+  add_value("secondary_cloud_subscription_reliability", "best_effort");
+  add_value("cloud_subscription_depth", toString(cloud_subscription_depth_));
   add_value("latest_wheel_stamp_ns", toString(latest_wheel_stamp.nanoseconds()));
 
   array.status.push_back(status);
