@@ -56,6 +56,7 @@ def test_registration_and_map_parameters_are_bounded():
     ]
     assert params["use_constant_velocity_prediction"] is True
     assert params["use_scan_to_scan_prediction"] is False
+    assert params["scan_to_scan_max_reference_age_s"] >= 0.0
     assert params["use_scan_to_scan_fallback"] is False
     assert params["add_scan_to_scan_fallback_keyframes"] is False
     assert params["use_motion_prior_fallback"] is False
@@ -67,6 +68,11 @@ def test_registration_and_map_parameters_are_bounded():
     assert 0.0 < params["deskew_max_scan_duration_s"] <= 1.0
     assert 0.0 < params["deskew_max_imu_gap_s"] <= params["deskew_imu_buffer_duration_s"]
     assert params["imu_subscription_depth"] >= 200
+    assert 0.0 <= params["imu_reorder_tolerance_s"]
+    assert params["imu_timestamp_reset_threshold_s"] > params["imu_reorder_tolerance_s"]
+    assert params["imu_watermark_topic"].startswith("/slam_3d/")
+    assert params["cloud_subscription_reliable"] is False
+    assert params["cloud_subscription_depth"] >= 1
     assert 0.0 <= params["deskew_min_time_ratio"] <= 1.0
     assert 0.0 <= params["deskew_time_bin_s"] <= params["deskew_max_scan_duration_s"]
     assert params["deskew_angular_velocity_scale"] > 0.0
@@ -92,6 +98,7 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["quarantine_keyframes_on_shock"] is False
     assert params["quarantine_pose_on_shock"] is False
     assert params["record_tracking_scan_on_pose_quarantine"] is False
+    assert params["pose_quarantine_tracking_reset_interval"] == 0
     assert params["keyframe_quarantine_correction_translation_m"] > 0.0
     assert params["keyframe_quarantine_correction_rotation_deg"] > 0.0
     assert params["place_recognition_enabled"] is False
@@ -119,8 +126,10 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["planar_pose_max_z_correction_m"] >= 0.0
     assert params["gravity_roll_pitch_constraint_enabled"] is False
     assert 0.0 <= params["gravity_accel_low_pass_alpha"] <= 1.0
+    assert params["gravity_accel_time_constant_s"] >= 0.0
     assert params["gravity_accel_min_norm_mps2"] > 0.0
     assert params["gravity_accel_max_norm_mps2"] >= params["gravity_accel_min_norm_mps2"]
+    assert 0.0 < params["gravity_accel_max_age_s"] <= params["deskew_imu_buffer_duration_s"]
     assert params["map_z_filter_enabled"] is False
     assert params["map_z_filter_min_m"] < params["map_z_filter_max_m"]
     assert params["pose_graph_correction_min_keyframes"] > 0
@@ -134,6 +143,7 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["pose_graph_loop_translation_weight"] >= 0.0
     assert params["pose_graph_loop_rotation_weight"] >= 0.0
     assert params["pose_graph_loop_cauchy_scale"] > 0.0
+    assert params["pose_graph_min_new_loop_robust_weight"] == 0.0
     assert params["pose_graph_max_iteration_translation_step_m"] > 0.0
     assert params["pose_graph_max_iteration_rotation_step_deg"] > 0.0
     assert params["pose_graph_max_loop_residual_before"] >= 0.0

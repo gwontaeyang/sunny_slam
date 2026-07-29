@@ -123,6 +123,12 @@ def _include_learning_slam_core(context):
                 "registration_method": LaunchConfiguration(
                     "learning_slam_registration_method"
                 ),
+                "cloud_subscription_reliable": LaunchConfiguration(
+                    "learning_slam_cloud_qos_reliable"
+                ),
+                "cloud_subscription_depth": LaunchConfiguration(
+                    "learning_slam_cloud_qos_depth"
+                ),
                 "publish_tf": LaunchConfiguration("learning_slam_publish_tf"),
             }.items(),
         )
@@ -273,6 +279,19 @@ def generate_launch_description():
             "learning_slam_registration_method",
             default_value="gicp",
             description="Learning core registration method: gicp or icp",
+        ),
+        DeclareLaunchArgument(
+            "learning_slam_cloud_qos_reliable",
+            default_value="false",
+            description=(
+                "Use reliable QoS for the learning core primary cloud subscription. "
+                "Default false preserves SensorDataQoS best-effort behavior."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "learning_slam_cloud_qos_depth",
+            default_value="5",
+            description="Learning core primary cloud subscription QoS history depth",
         ),
         DeclareLaunchArgument(
             "learning_slam_publish_tf",

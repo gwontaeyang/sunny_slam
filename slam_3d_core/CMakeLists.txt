@@ -35,7 +35,18 @@ add_library(scan_to_map_icp
   src/scan_to_map_icp.cpp
 )
 
+add_library(voxel_surfel_registration
+  src/voxel_surfel_registration.cpp
+)
+
 target_include_directories(scan_to_map_icp PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${PCL_INCLUDE_DIRS}
+  ${Eigen3_INCLUDE_DIRS}
+)
+
+target_include_directories(voxel_surfel_registration PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
@@ -60,6 +71,11 @@ target_link_libraries(scan_to_map_icp
   Eigen3::Eigen
 )
 
+target_link_libraries(voxel_surfel_registration
+  ${PCL_LIBRARIES}
+  Eigen3::Eigen
+)
+
 add_executable(scan_to_map_icp_node
   src/scan_to_map_icp_node.cpp
 )
@@ -77,7 +93,7 @@ target_link_libraries(scan_to_map_icp_node
   scan_to_map_icp
 )
 
-install(TARGETS scan_to_map_icp
+install(TARGETS scan_to_map_icp voxel_surfel_registration
   EXPORT export_scan_to_map_icp
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -114,6 +130,7 @@ ament_export_dependencies(
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
@@ -122,7 +139,27 @@ if(BUILD_TESTING)
   # Keep this prototype testable in offline dataset-replay environments.
   set(ament_cmake_xmllint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+  ament_add_gtest(test_voxel_surfel_registration
+    test/test_voxel_surfel_registration.cpp
+  )
+  target_link_libraries(test_voxel_surfel_registration
+    voxel_surfel_registration
+  )
+  ament_add_gtest(test_registration_policy
+    test/test_registration_policy.cpp
+  )
+  target_include_directories(test_registration_policy PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_link_libraries(test_registration_policy
+    Eigen3::Eigen
+  )
   ament_add_pytest_test(test_scan_to_map_config test/test_scan_to_map_config.py)
+  ament_add_pytest_test(
+    test_scan_to_map_runtime
+    test/test_scan_to_map_runtime.py
+    TIMEOUT 60
+  )
 endif()
 
 ament_package()
