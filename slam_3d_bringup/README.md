@@ -56,11 +56,15 @@ Detailed design:
 | --- | --- | --- | --- |
 | Wheel odometry | `/motor_driver_node/odom` | `gole_core/device/driver/motor_driver` | Planar velocity prior, slip detection, sanity reference |
 | IMU | `/imu/data` | external/MicroStrain IMU stack | Propagation, gravity, deskew |
-| Front Mid-360 | `/slam_3d/input/mid360_front/livox` | future Livox driver config | Raw LIO measurement stream |
-| Rear Mid-360 | `/slam_3d/input/mid360_rear/livox` | future Livox driver config | Raw LIO measurement stream |
+| Front Mid-360 | `/slam_3d/input/mid360_front/livox` | Livox driver config | Raw CustomMsg stream |
+| Rear Mid-360 | `/slam_3d/input/mid360_rear/livox` | Livox driver config | Raw CustomMsg stream |
 
-Use Livox raw/custom messages for LIO input. PointCloud2 debug streams are for
-visualization and recording; they are not the LIO input contract.
+`slam_3d_livox_ingest` now validates both raw streams and publishes separate
+`points_timed` clouds. These retain Livox `offset_time`, source identity,
+reflectivity, tag, and line. They are the input to the current learning core.
+Lossy `points_debug` streams remain visualization and legacy-dataset paths.
+The future tightly coupled frontend should consume the same validated timing
+contract without concatenating the sensors before deskew.
 
 ## Why Not Simple PointCloud Merge
 
@@ -94,6 +98,7 @@ Useful development checks:
 ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py --show-args
 ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_static_tf:=true
 ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_wheel_imu_ekf:=true
+ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_mid360_ingest:=true
 ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_learning_slam_core:=true
 ```
 
@@ -104,6 +109,10 @@ Core arguments:
 - `pipeline_config_file`: path to `large_scale_outdoor_pipeline.yaml`.
 - `run_livox_driver`: include Livox ROS Driver 2 after the two-device config is
   ready. Default `false`.
+- `run_mid360_ingest`: validate raw `CustomMsg` timing and emit canonical
+  front/rear `points_timed` clouds. Default `false`; the executable is available
+  only when `livox_ros_driver2` was present while building
+  `slam_3d_livox_ingest`.
 - `run_wheel_imu_ekf`: run a reference wheel/IMU EKF. Default `false`.
 - `run_learning_slam_core`: run `slam_3d_core/scan_to_map_icp_node`.
   Default `false`.
@@ -119,6 +128,9 @@ Placeholder extrinsics:
 - Rear: `rear_x:=-0.45 rear_y:=0.0 rear_z:=0.52 rear_yaw:=3.141592653589793`
 
 Replace these with measured CAD/calibration values before any bag validation.
+The stock Livox `msg_MID360_launch.py` uses custom messages but one shared
+LiDAR topic. A dual unit must use `multi_topic=1` and map each device topic to
+the explicit front/rear raw topics.
 
 ## TF Ownership
 

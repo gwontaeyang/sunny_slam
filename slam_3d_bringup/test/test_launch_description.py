@@ -6,6 +6,7 @@ from launch import LaunchContext
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import IncludeLaunchDescription
+from launch.actions import LogInfo
 
 
 def _load_package_launch_module(package_name, launch_file, module_name):
@@ -48,12 +49,19 @@ def test_launch_description_defaults_are_safe_for_scaffold():
 
     assert _default_value(declarations["pipeline_mode"]) == "architecture_only"
     assert _default_value(declarations["run_livox_driver"]) == "false"
+    assert _default_value(declarations["run_mid360_ingest"]) == "false"
     assert _default_value(declarations["run_static_tf"]) == "false"
     assert _default_value(declarations["run_wheel_imu_ekf"]) == "false"
     assert _default_value(declarations["run_learning_slam_core"]) == "false"
     assert _default_value(declarations["learning_slam_cloud_qos_reliable"]) == "false"
     assert _default_value(declarations["learning_slam_cloud_qos_depth"]) == "5"
     assert _default_value(declarations["learning_slam_publish_tf"]) == "false"
+    assert _default_value(declarations["learning_slam_primary_cloud_topic"]).endswith(
+        "/mid360_front/points_timed"
+    )
+    assert _default_value(declarations["learning_slam_secondary_cloud_topic"]).endswith(
+        "/mid360_rear/points_timed"
+    )
     assert _default_value(declarations["run_rviz"]) == "false"
     assert "large_scale_outdoor_pipeline.yaml" in _default_value(
         declarations["pipeline_config_file"]
@@ -62,6 +70,37 @@ def test_launch_description_defaults_are_safe_for_scaffold():
     assert "fast_lio_package" not in declarations
     assert "glim_package" not in declarations
     assert "kiss_icp_package" not in declarations
+
+
+def test_mid360_ingest_disabled_path_needs_no_driver_or_adapter():
+    module = _load_launch_module()
+    context = LaunchContext()
+    context.launch_configurations["run_mid360_ingest"] = "false"
+
+    assert module._include_mid360_ingest(context) == []
+
+
+def test_mid360_ingest_missing_executable_logs_without_launching(monkeypatch):
+    module = _load_launch_module()
+    context = LaunchContext()
+    context.launch_configurations["run_mid360_ingest"] = "true"
+    monkeypatch.setattr(
+        module,
+        "get_package_prefix",
+        lambda package_name: "/tmp/missing_mid360_ingest",
+    )
+    monkeypatch.setattr(
+        module,
+        "get_package_share_directory",
+        lambda package_name: "/tmp/missing_mid360_ingest/share",
+    )
+
+    actions = module._include_mid360_ingest(context)
+
+    assert len(actions) == 1
+    assert isinstance(actions[0], LogInfo)
+    message = "".join(substitution.perform(context) for substitution in actions[0].msg)
+    assert "livox_ros_driver2" in message
 
 
 def test_learning_core_cloud_qos_arguments_are_forwarded():

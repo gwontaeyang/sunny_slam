@@ -38,9 +38,23 @@ Responsibilities:
 
 - Receive each Mid-360 stream independently.
 - Preserve Livox per-point offset time and any tag/line/intensity fields.
-- Publish PointCloud2 only as debug/recording output after the raw contract is
-  preserved.
+- Validate `timebase`, point count, finite ratio, offset ordering, scan
+  duration, and per-sensor packet time progression.
+- Publish separate canonical PointCloud2 streams with
+  `header.stamp=timebase+measured_sensor_offset` and unchanged nanosecond
+  `offset_time`. This is a lossless timing boundary, not front/rear fusion.
 - Record packet counts, header stamps, hardware stamps, and drop counters.
+
+Implemented boundary:
+
+- Package: `slam_3d_livox_ingest`
+- Input: two `livox_ros_driver2/msg/CustomMsg` topics
+- Output: two `/slam_3d/input/.../points_timed` topics
+- Health: `/slam_3d/ingest/health`
+
+The Livox driver remains an external hardware dependency. Dataset-only builds
+still compile and test the time-contract library while omitting the message
+adapter executable.
 
 Non-goals:
 
@@ -145,8 +159,9 @@ Conflict to avoid:
 
 ## Milestones
 
-1. Topic and bag contract.
-2. Static time/extrinsic validation.
+1. Topic and bag contract. Implemented for raw and canonical timed streams.
+2. Static time/extrinsic validation. Packet-time validation is implemented;
+   measured dual-LiDAR/IMU offsets and extrinsics still require a sensor bag.
 3. Single-front Mid-360 LIO.
 4. Single-rear Mid-360 LIO.
 5. Dual measurement update against one state.

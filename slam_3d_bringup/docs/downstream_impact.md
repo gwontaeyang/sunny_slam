@@ -114,8 +114,8 @@ Rule:
 
 - Run Livox driver and IMU/wheel recording.
 - No 3D SLAM TF.
-- Record raw Livox custom topics, debug PointCloud2, IMU, wheel odom, `/tf`,
-  and `/tf_static`.
+- Record raw Livox custom topics, validated `points_timed`, ingest diagnostics,
+  IMU, wheel odom, `/tf`, and `/tf_static`. Debug PointCloud2 is optional.
 
 ### Mapping mode
 

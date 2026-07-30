@@ -3,6 +3,7 @@
 import os
 
 from ament_index_python.packages import PackageNotFoundError
+from ament_index_python.packages import get_package_prefix
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -135,6 +136,88 @@ def _include_learning_slam_core(context):
     ]
 
 
+def _include_mid360_ingest(context):
+    if not _bool_arg(context, "run_mid360_ingest"):
+        return []
+
+    package_name = "slam_3d_livox_ingest"
+    try:
+        package_prefix = get_package_prefix(package_name)
+        package_share = get_package_share_directory(package_name)
+    except PackageNotFoundError:
+        return [
+            LogInfo(
+                msg=(
+                    "[slam_3d_bringup] slam_3d_livox_ingest was not found. "
+                    "Build the ingest package before enabling run_mid360_ingest."
+                )
+            )
+        ]
+
+    executable = os.path.join(
+        package_prefix,
+        "lib",
+        package_name,
+        "mid360_ingest_node",
+    )
+    if not os.path.isfile(executable):
+        return [
+            LogInfo(
+                msg=(
+                    "[slam_3d_bringup] mid360_ingest_node is unavailable. "
+                    "Install livox_ros_driver2 in an underlay and rebuild "
+                    "slam_3d_livox_ingest."
+                )
+            )
+        ]
+
+    params_file = LaunchConfiguration("mid360_ingest_params_file").perform(context)
+    if not params_file:
+        params_file = os.path.join(
+            package_share,
+            "config",
+            "mid360_ingest_params.yaml",
+        )
+
+    return [
+        Node(
+            package=package_name,
+            executable="mid360_ingest_node",
+            name="mid360_ingest",
+            output="screen",
+            parameters=[
+                params_file,
+                {
+                    "use_sim_time": LaunchConfiguration("use_sim_time"),
+                    "front_input_topic": LaunchConfiguration(
+                        "mid360_front_custom_topic"
+                    ),
+                    "rear_input_topic": LaunchConfiguration(
+                        "mid360_rear_custom_topic"
+                    ),
+                    "front_output_topic": LaunchConfiguration(
+                        "mid360_front_timed_topic"
+                    ),
+                    "rear_output_topic": LaunchConfiguration(
+                        "mid360_rear_timed_topic"
+                    ),
+                    "health_topic": LaunchConfiguration(
+                        "mid360_ingest_health_topic"
+                    ),
+                    "front_frame_id": LaunchConfiguration("front_frame"),
+                    "rear_frame_id": LaunchConfiguration("rear_frame"),
+                    "input_reliable": LaunchConfiguration(
+                        "mid360_ingest_input_reliable"
+                    ),
+                    "output_reliable": LaunchConfiguration(
+                        "mid360_ingest_output_reliable"
+                    ),
+                },
+            ],
+        )
+    ]
+
+
 def _log_pipeline_contract(context):
     mode = LaunchConfiguration("pipeline_mode").perform(context)
     config_file = LaunchConfiguration("pipeline_config_file").perform(context)
@@ -235,6 +318,56 @@ def generate_launch_description():
             description="Publish placeholder base_link -> Mid-360 static transforms",
         ),
         DeclareLaunchArgument(
+            "run_mid360_ingest",
+            default_value="false",
+            description=(
+                "Validate separate Livox CustomMsg streams and publish canonical "
+                "per-point-timed PointCloud2 streams"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "mid360_ingest_params_file",
+            default_value="",
+            description=(
+                "Parameter file for slam_3d_livox_ingest. Empty uses its package default."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "mid360_front_custom_topic",
+            default_value="/slam_3d/input/mid360_front/livox",
+            description="Raw front Livox CustomMsg topic",
+        ),
+        DeclareLaunchArgument(
+            "mid360_rear_custom_topic",
+            default_value="/slam_3d/input/mid360_rear/livox",
+            description="Raw rear Livox CustomMsg topic",
+        ),
+        DeclareLaunchArgument(
+            "mid360_front_timed_topic",
+            default_value="/slam_3d/input/mid360_front/points_timed",
+            description="Validated front PointCloud2 topic retaining offset_time",
+        ),
+        DeclareLaunchArgument(
+            "mid360_rear_timed_topic",
+            default_value="/slam_3d/input/mid360_rear/points_timed",
+            description="Validated rear PointCloud2 topic retaining offset_time",
+        ),
+        DeclareLaunchArgument(
+            "mid360_ingest_health_topic",
+            default_value="/slam_3d/ingest/health",
+            description="Mid-360 packet and point-time contract diagnostics",
+        ),
+        DeclareLaunchArgument(
+            "mid360_ingest_input_reliable",
+            default_value="false",
+            description="Use reliable CustomMsg input QoS for bounded offline replay",
+        ),
+        DeclareLaunchArgument(
+            "mid360_ingest_output_reliable",
+            default_value="false",
+            description="Use reliable timed-cloud output QoS for bounded offline replay",
+        ),
+        DeclareLaunchArgument(
             "run_wheel_imu_ekf",
             default_value="false",
             description=(
@@ -262,12 +395,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "learning_slam_primary_cloud_topic",
-            default_value="/slam_3d/input/mid360_front/points_debug",
+            default_value="/slam_3d/input/mid360_front/points_timed",
             description="Primary PointCloud2 stream for the learning SLAM core",
         ),
         DeclareLaunchArgument(
             "learning_slam_secondary_cloud_topic",
-            default_value="/slam_3d/input/mid360_rear/points_debug",
+            default_value="/slam_3d/input/mid360_rear/points_timed",
             description="Secondary PointCloud2 stream for the learning SLAM core",
         ),
         DeclareLaunchArgument(
@@ -421,6 +554,7 @@ def generate_launch_description():
             _static_tf_node("base_to_mid360_rear_tf", "rear"),
             wheel_imu_ekf,
             OpaqueFunction(function=_include_livox_driver),
+            OpaqueFunction(function=_include_mid360_ingest),
             OpaqueFunction(function=_include_learning_slam_core),
             rviz,
         ]

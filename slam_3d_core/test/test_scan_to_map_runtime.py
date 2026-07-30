@@ -10,7 +10,7 @@ import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Imu, PointCloud2
+from sensor_msgs.msg import Imu, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, Int64
 
@@ -198,6 +198,201 @@ def test_sparse_scan_reports_completion_and_large_imu_rewind_is_dropped():
                 == "detect_and_drop_without_partial_state_reset"
             )
             assert process.poll() is None
+        finally:
+            if process.poll() is None:
+                os.killpg(os.getpgid(process.pid), signal.SIGINT)
+                try:
+                    process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    process.wait(timeout=5.0)
+            test_node.destroy_node()
+            rclpy.shutdown()
+
+
+def test_offset_time_cloud_applies_gyro_deskew():
+    token = uuid.uuid4().hex[:8]
+    prefix = f"/slam_3d_core_deskew_test/run_{token}"
+    cloud_topic = f"{prefix}/cloud"
+    imu_topic = f"{prefix}/imu"
+    health_topic = f"{prefix}/health"
+    watermark_topic = f"{prefix}/imu_watermark"
+    command = [
+        "ros2",
+        "run",
+        "slam_3d_core",
+        "scan_to_map_icp_node",
+        "--ros-args",
+        "-r",
+        f"__node:=scan_to_map_deskew_runtime_{token}",
+        "-p",
+        f"primary_cloud_topic:={cloud_topic}",
+        "-p",
+        "use_secondary_cloud:=false",
+        "-p",
+        "use_wheel_prediction:=false",
+        "-p",
+        "use_tf_transforms:=false",
+        "-p",
+        "cloud_subscription_reliable:=true",
+        "-p",
+        "crop_box_enabled:=false",
+        "-p",
+        "min_range_m:=0.0",
+        "-p",
+        "min_scan_points:=20",
+        "-p",
+        "deskew_enabled:=true",
+        "-p",
+        "deskew_point_time_field:=offset_time",
+        "-p",
+        "deskew_max_scan_duration_s:=0.2",
+        "-p",
+        "deskew_max_imu_gap_s:=0.03",
+        "-p",
+        f"imu_topic:={imu_topic}",
+        "-p",
+        f"health_topic:={health_topic}",
+        "-p",
+        f"imu_watermark_topic:={watermark_topic}",
+        "-p",
+        f"odom_topic:={prefix}/odom",
+        "-p",
+        f"path_topic:={prefix}/path",
+        "-p",
+        f"local_map_topic:={prefix}/local_map",
+        "-p",
+        f"global_map_topic:={prefix}/global_map",
+    ]
+
+    rclpy.init()
+    test_node = Node(f"scan_to_map_deskew_runtime_client_{token}")
+    cloud_qos = QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=2,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+    )
+    imu_qos = QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=100,
+        reliability=ReliabilityPolicy.BEST_EFFORT,
+        durability=DurabilityPolicy.VOLATILE,
+    )
+    watermark_qos = QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=10,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+    cloud_publisher = test_node.create_publisher(PointCloud2, cloud_topic, cloud_qos)
+    imu_publisher = test_node.create_publisher(Imu, imu_topic, imu_qos)
+    health_messages = []
+    watermark_messages = []
+    test_node.create_subscription(
+        DiagnosticArray,
+        health_topic,
+        health_messages.append,
+        20,
+    )
+    test_node.create_subscription(
+        Int64,
+        watermark_topic,
+        watermark_messages.append,
+        watermark_qos,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="slam_3d_core_deskew_runtime_") as temp_dir:
+        environment = os.environ.copy()
+        environment["ROS_LOG_DIR"] = str(Path(temp_dir) / "ros_log")
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            preexec_fn=os.setsid,
+            env=environment,
+        )
+
+        def wait_until(predicate, timeout_s=10.0):
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    output = process.stdout.read() if process.stdout else ""
+                    raise AssertionError(
+                        f"scan_to_map_icp_node exited with {process.returncode}:\n{output}"
+                    )
+                rclpy.spin_once(test_node, timeout_sec=0.05)
+                if predicate():
+                    return
+            raise AssertionError("timed out waiting for ROS runtime condition")
+
+        try:
+            wait_until(
+                lambda: cloud_publisher.get_subscription_count() == 1
+                and imu_publisher.get_subscription_count() == 1
+                and test_node.count_publishers(health_topic) == 1
+                and test_node.count_publishers(watermark_topic) == 1
+            )
+
+            for sample_index in range(13):
+                stamp_s = 9.99 + sample_index * 0.01
+                imu = Imu()
+                imu.header.stamp = _time_msg(stamp_s)
+                imu.angular_velocity.z = 1.0
+                imu.linear_acceleration.z = 9.81
+                imu_publisher.publish(imu)
+
+            wait_until(
+                lambda: watermark_messages
+                and watermark_messages[-1].data >= 10_110_000_000
+            )
+
+            fields = [
+                PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+                PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+                PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+                PointField(
+                    name="offset_time",
+                    offset=12,
+                    datatype=PointField.UINT32,
+                    count=1,
+                ),
+            ]
+            header = Header()
+            header.stamp = _time_msg(10.0)
+            header.frame_id = "base_link"
+            points = []
+            for point_index in range(200):
+                ratio = point_index / 199.0
+                points.append(
+                    (
+                        5.0 + 0.5 * ratio,
+                        -2.0 + 4.0 * ratio,
+                        0.25 * (point_index % 7),
+                        int(round(ratio * 100_000_000)),
+                    )
+                )
+            timed_cloud = point_cloud2.create_cloud(header, fields, points)
+            cloud_publisher.publish(timed_cloud)
+
+            def matching_health():
+                return [
+                    message
+                    for message in health_messages
+                    if message.header.stamp.sec == 10
+                    and message.header.stamp.nanosec == 0
+                ]
+
+            wait_until(lambda: bool(matching_health()))
+            values = _status_values(matching_health()[-1])
+            assert values["deskew_status"] == "applied"
+            assert values["deskew_applied"] == "true"
+            assert values["deskew_point_time_field"] == "offset_time"
+            assert values["deskew_points_with_time"] == "200"
+            assert values["deskew_point_count"] == "200"
+            assert float(values["deskew_time_ratio"]) == 1.0
+            assert abs(float(values["deskew_scan_duration_s"]) - 0.1) < 1.0e-6
         finally:
             if process.poll() is None:
                 os.killpg(os.getpgid(process.pid), signal.SIGINT)

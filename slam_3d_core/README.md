@@ -56,9 +56,12 @@ before a dataset replay can compare it against the current ICP/GICP path.
   requires a `PointCloud2` field such as `timestamp`, `time`, `t`, or
   `offset_time`; it does not estimate translation during the scan and is not
   IMU preintegration.
-- Mid-360 raw/custom fields are still not preserved by the current debug-cloud
-  producers. Deskew only has enough information when the upstream replay or raw
-  ingest publishes `PointCloud2` with per-point time fields intact.
+- `slam_3d_livox_ingest` now converts validated Mid-360 CustomMsg packets into
+  separate canonical PointCloud2 streams with
+  `header.stamp=timebase+measured_sensor_offset` and `offset_time` in relative
+  nanoseconds. Legacy replay scripts may still bypass that hardware boundary,
+  and they must not claim raw Mid-360 contract validation when their dataset
+  lacks point timing.
 - There is still no production-grade loop closure, submap persistence, or
   relocalization. The current backend is a small internal keyframe pose graph:
   odometry edges are added between consecutive keyframes, a loop edge is added
@@ -330,8 +333,9 @@ publishers are disabled.
 Parameters live in `config/scan_to_map_icp_params.yaml`.
 
 - Inputs:
-  - `/slam_3d/input/mid360_front/points_debug`
-  - `/slam_3d/input/mid360_rear/points_debug`
+  - `/slam_3d/input/mid360_front/points_timed` for Mid-360 bringup
+  - `/slam_3d/input/mid360_rear/points_timed` for Mid-360 bringup
+  - explicitly remapped legacy dataset PointCloud2 topics for offline replay
   - `/motor_driver_node/odom`
   - `/imu/data`
 - Outputs:
@@ -349,8 +353,8 @@ Parameters live in `config/scan_to_map_icp_params.yaml`.
    replay before changing the default GICP path.
 2. Add a synthetic runtime test that creates two translated clouds and verifies
    the selected frontend path through the ROS node.
-3. Add a Livox raw/custom ingest layer that preserves per-point time,
-   reflectivity, tag, and source sensor id.
+3. Pair front/rear packets without reusing a stale secondary snapshot, while
+   keeping the two measurement sets separate until deskew.
 4. Extend deskew from gyro-only rotation correction to full LIO propagation with
    measured IMU-to-LiDAR extrinsics and translation compensation.
 5. Replace wheel odom pose-delta prediction with a covariance-weighted planar
