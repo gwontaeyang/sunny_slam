@@ -8,6 +8,7 @@
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
+  int exit_code = 0;
 
   try {
     const auto node = std::make_shared<gole::slam_3d_core::ScanToMapIcp>(
@@ -20,8 +21,9 @@ int main(int argc, char ** argv)
       rclcpp::get_logger("scan_to_map_icp_node"),
       "Unhandled exception: %s",
       ex.what());
+    exit_code = 1;
   }
 
   rclcpp::shutdown();
-  return 0;
+  return exit_code;
 }

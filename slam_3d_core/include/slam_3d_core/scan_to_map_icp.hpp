@@ -5,6 +5,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "std_msgs/msg/int64.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_broadcaster.h"
 #include "tf2_ros/transform_listener.h"
@@ -61,6 +63,7 @@ private:
   struct PoseGraphStats
   {
     bool applied{false};
+    bool new_loop_rejected{false};
     int iterations{0};
     int nodes{0};
     int edges{0};
@@ -74,6 +77,7 @@ private:
     double new_loop_robust_weight{1.0};
     double max_update_translation_m{0.0};
     double max_update_rotation_deg{0.0};
+    std::string rejection_reason;
   };
 
   struct RegistrationResult
@@ -91,19 +95,26 @@ private:
     int iterations{0};
     int scan_points_before_downsample{0};
     int scan_points_after_downsample{0};
+    int consecutive_pose_quarantine_count{0};
     double scan_voxel_leaf_m{0.0};
     bool scan_voxel_adapted{false};
     bool shock_quarantined{false};
     bool pose_quarantined{false};
+    bool pose_quarantine_tracking_reset{false};
     bool keyframe_added{false};
     bool keyframe_quarantined{false};
     bool deskew_attempted{false};
     bool deskew_applied{false};
+    bool scan_to_scan_prediction_used{false};
     bool imu_rotation_prediction_used{false};
     bool place_recognition_attempted{false};
     bool place_recognition_skipped{false};
     bool place_recognition_accepted{false};
+    bool place_recognition_pose_metrics_evaluated{false};
+    bool place_recognition_pose_metrics_valid{false};
     bool pose_graph_correction_applied{false};
+    bool pose_graph_new_loop_rejected{false};
+    bool gravity_accel_used{false};
     bool imu_roughness_evaluated{false};
     bool imu_roughness_event{false};
     bool imu_roughness_recent_event{false};
@@ -124,8 +135,13 @@ private:
     int registration_refinement_iterations{0};
     double deskew_time_ratio{0.0};
     double deskew_scan_duration_s{0.0};
+    double scan_to_scan_reference_age_s{0.0};
     double place_recognition_descriptor_distance{0.0};
     double place_recognition_yaw_offset_deg{0.0};
+    double place_recognition_prediction_jump_translation_m{0.0};
+    double place_recognition_prediction_jump_rotation_deg{0.0};
+    double place_recognition_map_correction_translation_m{0.0};
+    double place_recognition_map_correction_rotation_deg{0.0};
     double pose_graph_correction_translation_m{0.0};
     double pose_graph_correction_rotation_deg{0.0};
     double pose_graph_residual_before{0.0};
@@ -136,6 +152,11 @@ private:
     double pose_graph_new_loop_robust_weight{1.0};
     double pose_graph_max_update_translation_m{0.0};
     double pose_graph_max_update_rotation_deg{0.0};
+    double gravity_accel_age_s{-1.0};
+    double gravity_accel_norm_mps2{0.0};
+    double gravity_filter_alpha{0.0};
+    double gravity_roll_deg{0.0};
+    double gravity_pitch_deg{0.0};
     double imu_roughness_max_angular_velocity_radps{0.0};
     double imu_roughness_max_angular_accel_radps2{0.0};
     double imu_roughness_max_linear_accel_mps2{0.0};
@@ -155,10 +176,13 @@ private:
     std::string keyframe_quarantine_reason;
     std::string deskew_status;
     std::string deskew_point_time_field;
+    std::string scan_to_scan_prediction_status{"disabled"};
     std::string imu_rotation_prediction_status{"disabled"};
     std::string imu_roughness_reason{"disabled"};
     std::string place_recognition_trigger{"none"};
     std::string place_recognition_skip_reason;
+    std::string pose_graph_rejection_reason;
+    std::string gravity_constraint_status{"disabled"};
   };
 
   struct DeskewStats
@@ -178,6 +202,13 @@ private:
     rclcpp::Time stamp;
     Eigen::Vector3d angular_velocity{Eigen::Vector3d::Zero()};
     Eigen::Vector3d linear_acceleration{Eigen::Vector3d::Zero()};
+  };
+
+  struct GravitySample
+  {
+    rclcpp::Time stamp;
+    Eigen::Vector3d accel_base{Eigen::Vector3d::UnitZ()};
+    double filter_alpha{0.0};
   };
 
   struct ImuRoughnessStats
@@ -243,7 +274,9 @@ private:
     bool have_previous_scan_stamp,
     bool & used_scan_to_scan,
     bool & used_imu_rotation_prediction,
-    std::string & imu_rotation_prediction_status);
+    std::string & imu_rotation_prediction_status,
+    double & scan_to_scan_reference_age_s,
+    std::string & scan_to_scan_prediction_status);
   std::optional<Eigen::Quaterniond> integrateImuRotationDelta(
     const rclcpp::Time & start_stamp,
     const rclcpp::Time & end_stamp,
@@ -253,10 +286,17 @@ private:
     const Eigen::Isometry3d & candidate) const;
   Eigen::Isometry3d constrainPlanarPose(
     const Eigen::Isometry3d & candidate,
-    const Eigen::Isometry3d & reference) const;
+    const Eigen::Isometry3d & reference,
+    const std::optional<GravitySample> & gravity_sample) const;
+  std::optional<GravitySample> gravitySampleAt(
+    const rclcpp::Time & stamp,
+    bool & stale) const;
   void commitWheelPrediction();
   void recordAcceptedPose();
-  void recordTrackingScan(const CloudConstPtr & scan_base, const Eigen::Isometry3d & pose);
+  void recordTrackingScan(
+    const CloudConstPtr & scan_base,
+    const Eigen::Isometry3d & pose,
+    const rclcpp::Time & stamp);
   RegistrationResult registerScanToMap(
     const CloudConstPtr & scan_base,
     const CloudConstPtr & local_map,
@@ -302,6 +342,7 @@ private:
   void applyPoseGraphCorrection(
     const rclcpp::Time & stamp,
     const Eigen::Isometry3d & reference_pose,
+    const std::optional<GravitySample> & gravity_sample,
     RegistrationResult & result);
   void rebuildGlobalMap();
 
@@ -334,9 +375,11 @@ private:
   std::string local_map_topic_;
   std::string global_map_topic_;
   std::string health_topic_;
+  std::string imu_watermark_topic_;
   std::string registration_method_;
 
   bool use_secondary_cloud_{false};
+  bool cloud_subscription_reliable_{false};
   bool use_tf_transforms_{true};
   bool use_wheel_prediction_{true};
   bool use_constant_velocity_prediction_{true};
@@ -431,6 +474,7 @@ private:
   double pose_graph_loop_translation_weight_{1.0};
   double pose_graph_loop_rotation_weight_{1.0};
   double pose_graph_loop_cauchy_scale_{1.0};
+  double pose_graph_min_new_loop_robust_weight_{0.0};
   double pose_graph_max_iteration_translation_step_m_{0.25};
   double pose_graph_max_iteration_rotation_step_deg_{5.0};
   double pose_graph_max_loop_residual_before_{0.0};
@@ -438,8 +482,12 @@ private:
   double pose_graph_max_residual_ratio_{0.0};
   double planar_pose_max_z_correction_m_{0.0};
   double gravity_accel_low_pass_alpha_{0.02};
+  double gravity_accel_time_constant_s_{0.0};
   double gravity_accel_min_norm_mps2_{6.0};
   double gravity_accel_max_norm_mps2_{13.0};
+  double gravity_accel_max_age_s_{0.1};
+  double imu_reorder_tolerance_s_{0.02};
+  double imu_timestamp_reset_threshold_s_{0.5};
   double map_z_filter_min_m_{-5.0};
   double map_z_filter_max_m_{8.0};
   double min_registration_inlier_ratio_{0.15};
@@ -451,6 +499,7 @@ private:
   double crop_min_z_{-0.8};
   double crop_max_z_{0.8};
   double map_publish_period_s_{1.0};
+  double scan_to_scan_max_reference_age_s_{0.0};
 
   int min_scan_points_{200};
   int adaptive_scan_voxel_min_points_{900};
@@ -462,6 +511,8 @@ private:
   int place_recognition_candidate_map_neighbors_{6};
   int pose_graph_correction_min_keyframes_{5};
   int pose_graph_optimization_iterations_{25};
+  int pose_quarantine_tracking_reset_interval_{0};
+  int cloud_subscription_depth_{5};
   int imu_subscription_depth_{400};
   int max_icp_iterations_{40};
   int robust_registration_refinement_iterations_{15};
@@ -495,18 +546,28 @@ private:
   bool have_last_pose_graph_correction_stamp_{false};
   bool have_last_place_recognition_attempt_stamp_{false};
   bool have_gravity_accel_base_{false};
+  bool have_last_gravity_accel_stamp_{false};
   bool have_last_imu_roughness_event_stamp_{false};
   rclcpp::Time latest_imu_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time latest_wheel_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_processed_scan_stamp_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time previous_tracking_scan_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_pose_graph_correction_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_place_recognition_attempt_stamp_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_gravity_accel_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_imu_roughness_event_stamp_{0, 0, RCL_ROS_TIME};
 
   std::vector<Keyframe> keyframes_;
   std::vector<PoseGraphEdge> pose_graph_edges_;
   std::deque<ImuSample> imu_buffer_;
+  std::deque<GravitySample> gravity_buffer_;
   Eigen::Vector3d gravity_accel_base_{Eigen::Vector3d::UnitZ()};
+  double latest_gravity_filter_alpha_{0.0};
+  int consecutive_pose_quarantine_count_{0};
+  int imu_duplicate_dropped_count_{0};
+  int imu_out_of_order_dropped_count_{0};
+  int imu_rewind_dropped_count_{0};
+  int imu_timestamp_reset_count_{0};
   CloudPtr global_map_;
   CloudPtr latest_local_map_;
   CloudPtr previous_tracking_scan_base_;
@@ -526,6 +587,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr local_map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr global_map_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr health_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr imu_watermark_pub_;
 
   rclcpp::TimerBase::SharedPtr map_publish_timer_;
 

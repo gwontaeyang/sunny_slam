@@ -41,6 +41,16 @@ def generate_launch_description():
             description="Fuse the latest secondary cloud when timestamp skew is acceptable",
         ),
         DeclareLaunchArgument(
+            "cloud_subscription_reliable",
+            default_value="false",
+            description="Use reliable QoS for the primary cloud when its publisher is reliable",
+        ),
+        DeclareLaunchArgument(
+            "cloud_subscription_depth",
+            default_value="5",
+            description="Primary and secondary cloud subscription history depth",
+        ),
+        DeclareLaunchArgument(
             "wheel_odom_topic",
             default_value="/motor_driver_node/odom",
             description="Existing GOLE wheel odometry topic used as a motion prior",
@@ -94,6 +104,14 @@ def generate_launch_description():
                 "use_secondary_cloud": ParameterValue(
                     LaunchConfiguration("use_secondary_cloud"),
                     value_type=bool,
+                ),
+                "cloud_subscription_reliable": ParameterValue(
+                    LaunchConfiguration("cloud_subscription_reliable"),
+                    value_type=bool,
+                ),
+                "cloud_subscription_depth": ParameterValue(
+                    LaunchConfiguration("cloud_subscription_depth"),
+                    value_type=int,
                 ),
                 "wheel_odom_topic": LaunchConfiguration("wheel_odom_topic"),
                 "imu_topic": LaunchConfiguration("imu_topic"),

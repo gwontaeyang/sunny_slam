@@ -43,14 +43,63 @@ mid360_raw_inputs:
       - reflectivity_or_intensity
       - line_or_tag_when_available
     frame_id: mid360_rear_link
+  front_points_timed:
+    topic: /slam_3d/input/mid360_front/points_timed
+    type: sensor_msgs/msg/PointCloud2
+    owner: slam_3d_livox_ingest
+    required_fields:
+      x: FLOAT32
+      y: FLOAT32
+      z: FLOAT32
+      intensity: FLOAT32
+      offset_time: UINT32_nanoseconds_relative_to_header
+      tag: UINT8
+      line: UINT8
+      lidar_id: UINT8
+    header_stamp: livox_custom_timebase_plus_measured_sensor_offset
+    use: validated_frontend_input
+  rear_points_timed:
+    topic: /slam_3d/input/mid360_rear/points_timed
+    type: sensor_msgs/msg/PointCloud2
+    owner: slam_3d_livox_ingest
+    required_fields:
+      x: FLOAT32
+      y: FLOAT32
+      z: FLOAT32
+      intensity: FLOAT32
+      offset_time: UINT32_nanoseconds_relative_to_header
+      tag: UINT8
+      line: UINT8
+      lidar_id: UINT8
+    header_stamp: livox_custom_timebase_plus_measured_sensor_offset
+    use: validated_frontend_input
   front_points_debug:
     topic: /slam_3d/input/mid360_front/points_debug
     type: sensor_msgs/msg/PointCloud2
-    use: visualization_and_recording_only
+    use: lossy_visualization_or_legacy_dataset_replay_only
   rear_points_debug:
     topic: /slam_3d/input/mid360_rear/points_debug
     type: sensor_msgs/msg/PointCloud2
-    use: visualization_and_recording_only
+    use: lossy_visualization_or_legacy_dataset_replay_only
+
+ingest_health:
+  topic: /slam_3d/ingest/health
+  type: diagnostic_msgs/msg/DiagnosticArray
+  owner: slam_3d_livox_ingest
+  rejection_policy:
+    - invalid_or_missing_timebase
+    - point_count_mismatch
+    - insufficient_finite_points
+    - offset_time_regression
+    - zero_or_excessive_scan_duration
+    - non_increasing_packet_timebase
+  notes: Front and rear remain separate. Peer start skew is diagnostic-only until paired synchronization is implemented.
+  commissioning_metadata:
+    front_clock_domain: unverified_until_measured
+    rear_clock_domain: unverified_until_measured
+    imu_clock_domain: unverified_until_measured
+    front_lidar_to_imu_offset_ns: 0_until_measured
+    rear_lidar_to_imu_offset_ns: 0_until_measured
 
 internal_topics:
   reference_wheel_imu_odom:

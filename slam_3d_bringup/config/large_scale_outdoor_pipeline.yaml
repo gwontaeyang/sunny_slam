@@ -19,6 +19,8 @@ frames:
 raw_inputs:
   front_livox_custom: /slam_3d/input/mid360_front/livox
   rear_livox_custom: /slam_3d/input/mid360_rear/livox
+  front_points_timed: /slam_3d/input/mid360_front/points_timed
+  rear_points_timed: /slam_3d/input/mid360_rear/points_timed
   front_points_debug: /slam_3d/input/mid360_front/points_debug
   rear_points_debug: /slam_3d/input/mid360_rear/points_debug
   wheel_odom: /motor_driver_node/odom
@@ -77,7 +79,31 @@ calibration_and_time:
       wheel_odom_gap_ms: 100.0
 
 sensor_ingest:
-  rule: preserve_livox_custom_fields_until_after_deskew
+  implementation: slam_3d_livox_ingest/mid360_ingest_node
+  rule: preserve_livox_custom_time_and_identity_fields_into_canonical_timed_clouds
+  timestamp_contract:
+    input_timebase: uint64_nanoseconds_first_point
+    input_offset_time: uint32_nanoseconds_relative_to_timebase
+    output_header_stamp: input_timebase_plus_per_sensor_measured_offset
+    output_offset_time: unchanged_uint32_nanoseconds
+    clock_domain_default: unverified
+    rule: numeric_timestamp_similarity_does_not_prove_lidar_imu_synchronization
+  packet_rejection:
+    - invalid_or_non_increasing_timebase
+    - declared_actual_point_count_mismatch
+    - nonfinite_point_ratio_below_threshold
+    - offset_time_regression
+    - zero_or_excessive_scan_duration
+  dual_policy:
+    front_rear_outputs: separate
+    peer_skew: diagnostics_only
+    pre_deskew_concatenation: forbidden
+  legacy_dataset_bypass:
+    allowed_for:
+      - kitti_xyz32
+      - gs_planar_xyz32
+      - hilti_native_pointcloud2_replay
+    rule: direct_pointcloud2_to_learning_core_without_claiming_raw_mid360_validation
   forbidden_before_lio:
     - PointXYZ_only_conversion
     - lidar_preprocessing_node
@@ -91,9 +117,9 @@ learning_prototype:
   launch_argument: run_learning_slam_core
   default_enabled: false
   role: editable_first_stage_scan_to_map_frontend
-  consumes_debug_pointcloud2:
-    - /slam_3d/input/mid360_front/points_debug
-    - /slam_3d/input/mid360_rear/points_debug
+  consumes_timed_pointcloud2:
+    - /slam_3d/input/mid360_front/points_timed
+    - /slam_3d/input/mid360_rear/points_timed
   consumes_existing_priors:
     wheel_odom: /motor_driver_node/odom
     imu: /imu/data
@@ -106,8 +132,9 @@ learning_prototype:
   tf_default: disabled
   deliberate_gaps_before_production:
     - no_imu_preintegration
-    - no_livox_per_point_time_deskew
-    - no_pose_graph_or_loop_closure
+    - gyro_only_deskew_without_translation_or_bias_state
+    - latest_secondary_snapshot_instead_of_paired_dual_measurement_queue
+    - no_production_factor_graph_or_persistent_submaps
     - no_submap_persistence
 
 frontend_lio:
@@ -196,6 +223,13 @@ loop_closure:
 
 runtime_health_metrics:
   required:
+    - front_ingest_contract_status
+    - rear_ingest_contract_status
+    - front_scan_duration_s
+    - rear_scan_duration_s
+    - front_rear_start_skew_ms
+    - front_rejected_packet_count
+    - rear_rejected_packet_count
     - front_lidar_rate_hz
     - rear_lidar_rate_hz
     - imu_rate_hz

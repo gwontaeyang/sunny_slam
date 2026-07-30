@@ -1,19 +1,29 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>slam_bringup</name>
-  <version>0.0.1</version>
-  <description>Launch package for GOLE SLAM mapping components.</description>
+  <name>slam_2d_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch, configuration, and replay tools for GOLE 2D SLAM.</description>
   <maintainer email="gwontaeyang@users.noreply.github.com">gwontaeyang</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>amcl_guard</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>lidar_preprocessing</exec_depend>
   <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>ros2bag</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>slam_2d_core</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

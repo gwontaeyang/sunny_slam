@@ -38,15 +38,30 @@ Implemented in:
 This is the editable baseline for learning scan registration, keyframe policy,
 local map construction, and dual-cloud synchronization.
 
+An independent point-to-plane registration core is also implemented in:
+
+- `include/slam_3d_core/voxel_surfel_registration.hpp`
+- `src/voxel_surfel_registration.cpp`
+- `test/test_voxel_surfel_registration.cpp`
+
+It builds planar voxel surfels, applies Huber IRLS, projects updates onto the
+observable Hessian subspace, and reports rank, condition, weak directions,
+residuals, and timing. It is deliberately not connected to
+`scan_to_map_icp_node` yet; the synthetic tests isolate numerical correctness
+before a dataset replay can compare it against the current ICP/GICP path.
+
 ## Deliberate Limitations
 
 - IMU data is buffered for an optional gyro-only rotation deskew step. This MVP
   requires a `PointCloud2` field such as `timestamp`, `time`, `t`, or
   `offset_time`; it does not estimate translation during the scan and is not
   IMU preintegration.
-- Mid-360 raw/custom fields are still not preserved by the current debug-cloud
-  producers. Deskew only has enough information when the upstream replay or raw
-  ingest publishes `PointCloud2` with per-point time fields intact.
+- `slam_3d_livox_ingest` now converts validated Mid-360 CustomMsg packets into
+  separate canonical PointCloud2 streams with
+  `header.stamp=timebase+measured_sensor_offset` and `offset_time` in relative
+  nanoseconds. Legacy replay scripts may still bypass that hardware boundary,
+  and they must not claim raw Mid-360 contract validation when their dataset
+  lacks point timing.
 - There is still no production-grade loop closure, submap persistence, or
   relocalization. The current backend is a small internal keyframe pose graph:
   odometry edges are added between consecutive keyframes, a loop edge is added
@@ -73,7 +88,21 @@ local map construction, and dual-cloud synchronization.
   `imu_subscription_depth` defaults to 400 instead of the depth-5 sensor QoS
   default so a one-second 400 Hz burst is not silently reduced to its last few
   samples. Access to the deskew/gravity buffer remains protected by
-  `imu_mutex_`.
+  `imu_mutex_`. Each accepted IMU callback also publishes its timestamp on the
+  transient-local reliable `/slam_3d/imu_watermark_ns` topic. Offline replay
+  can wait for this watermark before publishing a cloud, but it proves callback
+  progress only; it cannot prove that every intermediate best-effort IMU sample
+  was delivered. The reliable DDS publish occurs after releasing `imu_mutex_`
+  so middleware backpressure cannot block deskew/gravity readers inside the IMU
+  critical section.
+- Point clouds keep ROS sensor-data `best_effort` QoS by default so the node
+  remains compatible with live LiDAR drivers. Set
+  `cloud_subscription_reliable:=true` only when the publisher also offers
+  reliable QoS, such as a bounded offline bag replay where silently losing a
+  multi-megabyte cloud would invalidate an A/B comparison. This setting applies
+  only to the primary stream; the latest-message secondary debug stream remains
+  `best_effort`. `cloud_subscription_depth` bounds both application queues, so
+  reliable transport is not a substitute for replay backpressure.
 - Registration is accepted only when convergence, bounded-distance fitness, and
   prediction-to-result correction limits pass. The correction gate also checks
   aligned-cloud inlier ratio/RMSE against the local map so a small set of close
@@ -123,6 +152,11 @@ local map construction, and dual-cloud synchronization.
   motion-prior pose. This is an experimental recovery aid for shaky construction
   segments where skipping every shock scan makes the next scan match against a
   stale tracking frame.
+- `pose_quarantine_tracking_reset_interval` defaults to `0` (disabled). A
+  positive value re-seeds only every Nth consecutive pose-quarantined scan as
+  the scan-to-scan reference. It is a bounded alternative to recording every
+  shock scan: the persistent map and accepted-pose history remain untouched,
+  and diagnostics report the consecutive count and each tracking reset.
 - `place_recognition_enabled` defaults to `false`. It stores a lightweight
   polar scan descriptor per keyframe and tests older keyframe candidates with
   ICP when local registration is weak. `place_recognition_descriptor_bins`
@@ -163,6 +197,25 @@ local map construction, and dual-cloud synchronization.
   count of downweighted loop edges. This is an inspectable approximation of the
   robust pose-graph treatment used by systems such as Wildcat, not a replacement
   for a sparse nonlinear solver with properly modeled factor covariances.
+  `pose_graph_min_new_loop_robust_weight` rejects a newly proposed loop before
+  graph relaxation when the Cauchy kernel already regards it as an extreme
+  outlier. It only applies when robust loop weighting is enabled. Enabling the
+  robust loop kernel also makes pose-graph validation mandatory for an accepted
+  place match; if the proposed loop is rejected, the frontend restores the
+  pre-place-recognition registration instead of retaining the unvalidated pose
+  snap. This includes the relocalization path where local registration failed:
+  a rejected backend loop restores the rejected local result and enters the
+  normal fallback/rejection path. The same rollback occurs when validation is
+  required but pose-graph correction itself is disabled, so a contradictory
+  configuration fails closed. Every accepted place candidate first receives the
+  same motion, planar, and gravity bounds as the normal commit path, even when
+  backend validation is optional. Candidate-map ICP correction, bounded jump
+  from the current prediction, and the equivalent left map correction are
+  reported separately. Shock safety gates candidate-alignment correction and
+  bounded prediction jump; the map-origin-dependent left translation is
+  diagnostic only. A rejected candidate is restored before graph optimization,
+  so a quarantined pose cannot mutate the persistent graph and then be discarded
+  only from the frontend.
   `pose_graph_max_residual_after` and `pose_graph_max_residual_ratio` can reject
   a loop edge even when optimization technically reduces residual; this is useful
   for repeated construction-site geometry where a false loop can lower the
@@ -189,6 +242,28 @@ local map construction, and dual-cloud synchronization.
   scan-matched yaw. This is more appropriate than forcing zero roll/pitch for a
   handheld or a robot crossing a bump, but it still ignores acceleration bias
   and dynamic acceleration except for the simple norm gate.
+  `gravity_accel_time_constant_s > 0` changes the filter to
+  `alpha = 1 - exp(-dt/tau)` using IMU timestamps, making its physical response
+  independent of callback frequency. `0.0` preserves the legacy fixed
+  `gravity_accel_low_pass_alpha` behavior for reproducible baseline replays.
+  Each cloud captures the newest filtered gravity sample whose timestamp is not
+  later than the cloud timestamp and reuses that immutable sample throughout
+  frontend and backend constraints. This prevents a concurrently arriving
+  future IMU sample from changing roll/pitch halfway through one cloud.
+  `gravity_accel_max_age_s` defaults to `0.1`; an older snapshot is reported as
+  `stale_at_cloud_stamp` and is not applied.
+  Out-of-order IMU samples are dropped to keep deskew and rotation integration
+  ordered. `imu_reorder_tolerance_s` separates small reorder events from larger
+  rewinds in diagnostics, while a backward jump of at least
+  `imu_timestamp_reset_threshold_s` is counted as a reset candidate and dropped.
+  The node deliberately does not reset only the IMU/gravity buffers because that
+  would leave LiDAR trajectory state, cooldown stamps, keyframes, and path on a
+  different timeline. Restart the complete SLAM node after a real ROS clock
+  rewind.
+- Filtered scans that are already below `min_scan_points` before downsampling
+  publish a `scan_too_sparse_before_downsample` health record. Offline replay
+  can therefore distinguish an intentional sparse-frame rejection from a hung
+  callback.
 - `imu_roughness_detection_enabled` defaults to `false`. When enabled, the node
   computes per-scan IMU roughness diagnostics over the latest scan interval or
   `imu_roughness_window_s`, whichever is shorter. Diagnostics include max gyro
@@ -204,6 +279,11 @@ local map construction, and dual-cloud synchronization.
 - `use_scan_to_scan_prediction` and `use_scan_to_scan_fallback` default to
   `false`. They are intended for offline odom-free experiments such as HILTI
   bag replay, not as the final production LIO frontend.
+  The scan-to-scan IMU initial guess is integrated from the timestamp of the
+  actual retained tracking scan, which can be older than the previous incoming
+  cloud during pose quarantine. `scan_to_scan_max_reference_age_s > 0` rejects
+  a stale tracking reference before registration; `0.0` leaves the age gate
+  disabled for compatibility.
 - `deskew_enabled` defaults to `false`. When enabled, the node reads per-point
   acquisition time from the incoming `PointCloud2`, checks IMU coverage across
   the scan, integrates angular velocity, and rotates each point back to a
@@ -253,8 +333,9 @@ publishers are disabled.
 Parameters live in `config/scan_to_map_icp_params.yaml`.
 
 - Inputs:
-  - `/slam_3d/input/mid360_front/points_debug`
-  - `/slam_3d/input/mid360_rear/points_debug`
+  - `/slam_3d/input/mid360_front/points_timed` for Mid-360 bringup
+  - `/slam_3d/input/mid360_rear/points_timed` for Mid-360 bringup
+  - explicitly remapped legacy dataset PointCloud2 topics for offline replay
   - `/motor_driver_node/odom`
   - `/imu/data`
 - Outputs:
@@ -263,23 +344,27 @@ Parameters live in `config/scan_to_map_icp_params.yaml`.
   - `/slam_3d/map/active_submap`
   - `/slam_3d/map/global_cloud`
   - `/slam_3d/health`
+  - `/slam_3d/imu_watermark_ns`
 
 ## Next Code Milestones
 
-1. Add a synthetic registration unit test that creates two translated clouds
-   and verifies ICP/GICP convergence.
-2. Add a Livox raw/custom ingest layer that preserves per-point time,
-   reflectivity, tag, and source sensor id.
-3. Extend deskew from gyro-only rotation correction to full LIO propagation with
+1. Integrate `VoxelSurfelRegistration` behind an explicit runtime selection,
+   add its diagnostics to `/slam_3d/health`, and run a fixed-frame HILTI A/B
+   replay before changing the default GICP path.
+2. Add a synthetic runtime test that creates two translated clouds and verifies
+   the selected frontend path through the ROS node.
+3. Pair front/rear packets without reusing a stale secondary snapshot, while
+   keeping the two measurement sets separate until deskew.
+4. Extend deskew from gyro-only rotation correction to full LIO propagation with
    measured IMU-to-LiDAR extrinsics and translation compensation.
-4. Replace wheel odom pose-delta prediction with a covariance-weighted planar
+5. Replace wheel odom pose-delta prediction with a covariance-weighted planar
    velocity prior and slip rejection.
-5. Promote the optional ring/sector descriptor into a tested Scan Context or
+6. Promote the optional ring/sector descriptor into a tested Scan Context or
    Quatro-style place recognition module and replace the internal relaxation
    backend with a robust GTSAM/iSAM2 factor graph.
-6. Add shock/dropout diagnostics from IMU and odom deltas so keyframe
+7. Add shock/dropout diagnostics from IMU and odom deltas so keyframe
    quarantine is driven by sensor residuals, not only ICP correction size.
-7. Split keyframes into submaps and add a pose graph backend with loop closure.
+8. Split keyframes into submaps and add a pose graph backend with loop closure.
 
 ## References
 

@@ -1,0 +1,72 @@
+# ROS2 Bag Recording Topics
+# Add topics to record, one per line
+# Lines starting with # are ignored
+
+# Vision Processing
+/camera/front/color/image_raw/compressed
+/camera/front/color/camera_info
+/camera/front/color/tag_image/compressed
+/camera/front/color/edges_image/compressed
+/camera/front/color/lsd_markers
+/camera/rear/color/image_raw/compressed
+/camera/rear/color/camera_info
+/camera/rear/color/tag_image/compressed
+/camera/rear/color/edges_image/compressed
+/camera/rear/color/lsd_markers
+/camera/front/depth/obstacles
+/camera/front/depth/ground
+/tag_markers
+/line_array
+/tag_array
+
+# Motion Controller
+/motion_controller_node/target_waypoint_marker
+/cmd_vel
+/odom
+
+# Path Planning
+/local_path_planner_node/trajectory
+/local_path_planner_node/trajectory_markers
+/global_path_planner_node/viz_global_path
+/global_path_planner_node/global_path
+/global_path_planner_node/global_path_info
+
+# Sensors
+/imu/data
+/imu/data_raw
+/front/sick_scansegment_xd/imu
+/rear/sick_scansegment_xd/imu
+/front_scan
+/rear_scan
+/scan
+/scan_laserscan
+/scan_amcl
+/front/scan_fullframe
+/rear/scan_fullframe
+/front/scan_cloud
+/rear/scan_cloud
+
+# Localization Diagnostics
+/particlecloud
+/amcl_guard/active
+/amcl_guard/status
+/lidar_merger_node/diagnostics
+/pointcloud_to_laserscan_node/diagnostics
+
+# tf
+/tf
+/tf_static
+
+/v_marker_debug/sorted_points
+/v_marker_debug/clusters
+/v_marker_debug/sorted_points
+/v_marker_debug/roi_filtered
+/v_marker_debug/ground_truth_template_front
+/v_marker_debug/ground_truth_template_rear
+/v_marker_debug/gicp_source
+/v_marker_debug/gicp_target
+/v_marker_debug/aligned_template
+/localization_node/vmarker_pose
+/localization_node/corrected_vmarker_pose
+/motor_driver_node/odom
+/imu_driver_node/imu/corrected_data
