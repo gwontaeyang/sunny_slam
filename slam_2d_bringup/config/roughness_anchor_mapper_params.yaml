@@ -15,7 +15,7 @@ slam_toolbox:
     mode: "mapping"
     odom_frame: "odom"
     map_frame: "map"
-    base_frame: "base_footprint"
+    base_frame: "base_link"
     scan_topic: "/scan_laserscan"  # 기본값, launch에서 override 예정
     use_map_saver: true
 

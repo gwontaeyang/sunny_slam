@@ -1000,23 +1000,6 @@ def generate_launch_description():
         condition=IfCondition(use_static_map_odom)
     )
 
-    base_footprint_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='base_link_to_base_footprint_tf',
-        arguments=[
-            '--x', '0',
-            '--y', '0',
-            '--z', '0',
-            '--roll', '0',
-            '--pitch', '0',
-            '--yaw', '0',
-            '--frame-id', 'base_link',
-            '--child-frame-id', 'base_footprint',
-        ],
-        output='screen',
-    )
-
     pointcloud_projection_node = Node(
         package='lidar_preprocessing',
         executable='pointcloud_to_laserscan_node',
@@ -1026,7 +1009,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'input_topic': cloud_topic,
             'output_topic': scan_topic,
-            'output_frame': 'base_footprint',
+            'output_frame': 'base_link',
             'required_input_frame': 'base_link',
             'use_height_filter': True,
             'min_z': projection_min_z,
@@ -1040,7 +1023,7 @@ def generate_launch_description():
             'gate_by_tf_stamp': projection_gate_by_tf_stamp,
             'tf_topic': '/tf',
             'tf_gate_child_frame': projection_tf_gate_child_frame,
-            'tf_gate_child_frames': ['base_link', 'base_footprint'],
+            'tf_gate_child_frames': ['base_link'],
             'max_scan_tf_lag_s': projection_max_scan_tf_lag_s,
             'enable_gravity_alignment': projection_enable_gravity_alignment,
             'gravity_max_scan_imu_dt_s': projection_gravity_max_scan_imu_dt_s,
@@ -1258,7 +1241,6 @@ def generate_launch_description():
         roughness_anchor_slam_toolbox_node,
         pointcloud_projection_node,
         laserscan_roughness_gate_node,
-        base_footprint_tf,
         static_map_odom_tf,
         configure_event,
         activate_event,

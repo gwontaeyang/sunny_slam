@@ -9,7 +9,7 @@ ekf_filter_node:
 
     map_frame: map
     odom_frame: odom
-    base_link_frame: base_footprint
+    base_link_frame: base_link
     world_frame: odom
 
     odom0: /motor_driver_node/odom
@@ -66,7 +66,7 @@ ekf_filter_node:
                                0.0,  0.0,  0.0,  0.0,  0.0,  0.1]
 
     odom_frame: odom
-    base_link_frame: base_footprint
+    base_link_frame: base_link
 
     print_diagnostics: true
 
