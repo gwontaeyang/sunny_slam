@@ -27,6 +27,7 @@ def generate_launch_description():
     use_lifecycle_manager = LaunchConfiguration("use_lifecycle_manager")
     params_file = LaunchConfiguration("params_file")
     scan_topic = LaunchConfiguration("scan_topic")
+    base_frame = LaunchConfiguration("base_frame")
 
     declare_use_sim_time = DeclareLaunchArgument(
         "use_sim_time",
@@ -68,6 +69,11 @@ def generate_launch_description():
         default_value="/scan_laserscan",
         description="LaserScan topic used by slam_toolbox.",
     )
+    declare_base_frame = DeclareLaunchArgument(
+        "base_frame",
+        default_value="base_link",
+        description="Robot base frame used by slam_toolbox.",
+    )
 
     slam_toolbox_node = LifecycleNode(
         package="slam_toolbox",
@@ -80,6 +86,7 @@ def generate_launch_description():
             {
                 "use_sim_time": use_sim_time,
                 "scan_topic": scan_topic,
+                "base_frame": base_frame,
                 "use_lifecycle_manager": use_lifecycle_manager,
             },
         ],
@@ -121,6 +128,7 @@ def generate_launch_description():
             declare_use_lifecycle_manager,
             declare_params_file,
             declare_scan_topic,
+            declare_base_frame,
             slam_toolbox_node,
             configure_event,
             activate_event,

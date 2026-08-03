@@ -38,6 +38,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     start_slam = LaunchConfiguration("start_slam")
     scan_topic = LaunchConfiguration("scan_topic")
+    base_frame = LaunchConfiguration("base_frame")
     use_static_map_odom = LaunchConfiguration("use_static_map_odom")
     bag_play_rate = LaunchConfiguration("bag_play_rate")
     params_file = LaunchConfiguration("params_file")
@@ -61,6 +62,11 @@ def generate_launch_description():
         "scan_topic",
         default_value="/scan_laserscan",
         description="LaserScan topic used by slam_toolbox.",
+    )
+    declare_base_frame = DeclareLaunchArgument(
+        "base_frame",
+        default_value="base_link",
+        description="Robot base frame used by slam_toolbox.",
     )
     declare_use_static_map_odom = DeclareLaunchArgument(
         "use_static_map_odom",
@@ -89,6 +95,7 @@ def generate_launch_description():
             {
                 "use_sim_time": use_sim_time,
                 "scan_topic": scan_topic,
+                "base_frame": base_frame,
             },
         ],
         condition=IfCondition(start_slam),
@@ -181,6 +188,7 @@ def generate_launch_description():
             declare_use_sim_time,
             declare_start_slam,
             declare_scan_topic,
+            declare_base_frame,
             declare_use_static_map_odom,
             declare_bag_play_rate,
             declare_params_file,
