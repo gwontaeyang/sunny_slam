@@ -1,0 +1,45 @@
+# .github/workflows/enforce-merge-policy.yml
+name: Enforce merge policy
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]  # 모든 base 브랜치에서 동작
+
+jobs:
+  check-branch-pair:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Fail if disallowed branch pair
+        shell: bash
+        run: |
+          HEAD="${{ github.event.pull_request.head.ref }}"   # source
+          BASE="${{ github.event.pull_request.base.ref }}"   # target
+
+          echo "HEAD=${HEAD} -> BASE=${BASE}"
+
+          allowed=0
+
+          # 0) hotfix는 어디든 허용
+          if [[ "$HEAD" == hotfix/* ]]; then
+            allowed=1
+          fi
+
+          # 1) develop -> main 허용
+          if [[ "$HEAD" == "develop" && "$BASE" == "main" ]]; then
+            allowed=1
+          fi
+
+          # 2) feature/* -> develop 허용
+          if [[ "$HEAD" == feature/* && "$BASE" == "develop" ]]; then
+            allowed=1
+          fi
+
+          if [[ $allowed -eq 1 ]]; then
+            echo "✅ Allowed by policy."
+            exit 0
+          else
+            echo "::error::Merges from '$HEAD' to '$BASE' are not allowed by policy."
+            exit 1
+          fi

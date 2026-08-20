@@ -1,0 +1,55 @@
+name: Enforce up-to-date with develop
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+    branches: [main, develop]  # develop으로 들어오는 PR만 검사
+
+jobs:
+  up_to_date_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch develop
+        run: |
+          git fetch origin develop:origin/develop
+
+      - name: Fail if PR head is behind develop
+        shell: bash
+        run: |
+          # base는 develop, head는 PR 소스 브랜치
+          BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD="${{ github.event.pull_request.head.ref }}"
+          
+          # main으로 가는 경우 예외 (develop -> main 허용)
+          if [[ "$BASE" == "main" ]]; then
+            echo "✅ Skipping check for PRs targeting main branch."
+            exit 0
+          fi
+          
+          # hotfix 브랜치는 예외 (hotfix/* -> develop 허용)
+          if [[ "$HEAD" == hotfix/* ]]; then
+            echo "✅ Skipping check for hotfix branches."
+            exit 0
+          fi
+          
+          HEAD_SHA="$(git rev-parse HEAD)"
+          DEV_SHA="$(git rev-parse origin/develop)"
+          MB="$(git merge-base HEAD origin/develop)"
+
+          echo "HEAD=$HEAD_SHA"
+          echo "origin/develop=$DEV_SHA"
+          echo "merge-base=$MB"
+
+          # HEAD가 develop 최신을 포함하고 있지 않으면
+          if [[ "$MB" != "$DEV_SHA" ]]; then
+            echo "::error::Your branch is not up to date with 'develop'. Please rebase or merge 'develop' before merging."
+            echo "Tip: git fetch origin && git rebase origin/develop  (or merge)"
+            exit 1
+          fi
+
+          echo "✅ Up to date with develop."
