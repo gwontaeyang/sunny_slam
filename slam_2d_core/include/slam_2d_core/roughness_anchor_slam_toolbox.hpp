@@ -9,22 +9,8 @@
 #include <vector>
 
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "slam_2d_core/karto_scan_matcher_vector.hpp"
 #include "slam_toolbox/slam_toolbox_sync.hpp"
-
-namespace karto
-{
-
-// ROS Humble's karto shared library does not export this template specialization.
-template<>
-kt_double ScanMatcher::MatchScan<LocalizedRangeScanVector>(
-  LocalizedRangeScan * pScan,
-  const LocalizedRangeScanVector & rBaseScans,
-  Pose2 & rMean,
-  Matrix3 & rCovariance,
-  kt_bool doPenalize,
-  kt_bool doRefineMatch);
-
-}  // namespace karto
 
 namespace slam_2d_core
 {
@@ -72,9 +58,18 @@ public:
   explicit RoughnessAnchorSlamToolbox(rclcpp::NodeOptions options);
 
   void configure() override;
+  void loadPoseGraphByParams() override;
 
 protected:
   void laserCallback(sensor_msgs::msg::LaserScan::ConstSharedPtr scan) override;
+  bool serializePoseGraphCallback(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<slam_toolbox::srv::SerializePoseGraph::Request> req,
+    std::shared_ptr<slam_toolbox::srv::SerializePoseGraph::Response> resp) override;
+  bool deserializePoseGraphCallback(
+    const std::shared_ptr<rmw_request_id_t> request_header,
+    const std::shared_ptr<slam_toolbox::srv::DeserializePoseGraph::Request> req,
+    std::shared_ptr<slam_toolbox::srv::DeserializePoseGraph::Response> resp) override;
 
 private:
   struct VertexMatch
@@ -105,6 +100,15 @@ private:
   {
     std::vector<std::unique_ptr<karto::LocalizedRangeScan>> owned_scans;
     karto::LocalizedRangeScanVector scans;
+  };
+
+  struct RevisitConstraintFilterStats
+  {
+    std::size_t inspected_edges{0};
+    std::size_t long_edges{0};
+    std::size_t kept_long_edges{0};
+    std::size_t removed_long_edges{0};
+    std::size_t invalid_edges{0};
   };
 
   void loadRoughnessAnchorParameters();
@@ -145,6 +149,10 @@ private:
   std::size_t countGraphVertices() const;
   void logPendingConstraintStatus() const;
   karto::Matrix3 makeAnchorCovariance() const;
+  void attachLoopClosureDiagnostics();
+  bool detachLoopClosureDiagnostics();
+  void optimizeLoadedPoseGraphOnce();
+  RevisitConstraintFilterStats filterLongRevisitConstraints();
 
   bool enable_constraints_{false};
   bool inject_constraints_{true};
@@ -191,6 +199,16 @@ private:
   bool update_map_after_constraints_{true};
   bool constraints_loaded_{false};
   bool load_error_reported_{false};
+  bool enable_loop_closure_diagnostics_{false};
+  bool loop_closure_diagnostics_attached_{false};
+  bool optimize_loaded_pose_graph_once_{false};
+  bool revisit_optimizer_filter_long_edges_{false};
+  int revisit_optimizer_min_state_id_separation_{20};
+  double revisit_optimizer_min_time_separation_s_{60.0};
+  double revisit_optimizer_max_translation_variance_{0.03};
+  double revisit_optimizer_max_yaw_variance_{0.001};
+  double revisit_optimizer_max_current_translation_residual_m_{-1.0};
+  double revisit_optimizer_max_current_yaw_residual_rad_{-1.0};
   std::size_t anchor_timer_tick_{0};
   double latest_raw_scan_stamp_s_{-std::numeric_limits<double>::infinity()};
   rclcpp::TimerBase::SharedPtr anchor_timer_;

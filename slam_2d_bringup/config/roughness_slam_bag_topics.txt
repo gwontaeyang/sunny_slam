@@ -40,16 +40,12 @@
 /rear_scan
 /scan
 /scan_laserscan
-/scan_amcl
 /front/scan_fullframe
 /rear/scan_fullframe
 /front/scan_cloud
 /rear/scan_cloud
 
-# Localization Diagnostics
-/particlecloud
-/amcl_guard/active
-/amcl_guard/status
+# Sensor Diagnostics
 /lidar_merger_node/diagnostics
 /pointcloud_to_laserscan_node/diagnostics
 

@@ -26,7 +26,7 @@ slam_toolbox:
     throttle_scans: 1
     tf_buffer_duration: 40.0
     transform_timeout: 0.5
-    message_filter_queue_size: 100
+    scan_queue_size: 100
     enable_interactive_mode: false
     debug_logging: true
 
