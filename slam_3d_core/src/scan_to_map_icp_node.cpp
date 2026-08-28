@@ -13,7 +13,10 @@ int main(int argc, char ** argv)
   try {
     const auto node = std::make_shared<gole::slam_3d_core::ScanToMapIcp>(
       rclcpp::NodeOptions());
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    const auto executor_thread_count = static_cast<std::size_t>(
+      node->get_parameter("executor_thread_count").as_int());
+    rclcpp::executors::MultiThreadedExecutor executor(
+      rclcpp::ExecutorOptions(), executor_thread_count);
     executor.add_node(node);
     executor.spin();
   } catch (const std::exception & ex) {

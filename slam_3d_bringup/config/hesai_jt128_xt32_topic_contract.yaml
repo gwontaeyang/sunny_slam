@@ -1,0 +1,138 @@
+contract: gole_hesai_jt128_xt32_3d_slam_topics_v1
+
+dataset_evidence:
+  source: 02_samsung_geoje
+  verified: true
+  raw_message_type: sensor_msgs/msg/PointCloud2
+  input_point_step_bytes: 26
+  input_fields:
+    x: {offset: 0, type: FLOAT32}
+    y: {offset: 4, type: FLOAT32}
+    z: {offset: 8, type: FLOAT32}
+    intensity: {offset: 12, type: FLOAT32}
+    ring: {offset: 16, type: UINT16}
+    timestamp: {offset: 18, type: FLOAT64}
+  timestamp_quality:
+    semantic: packet_time_not_channel_firing_time
+    consecutive_points_per_observed_timestamp: 256
+    exact_lidar_imu_clock_alignment: not_recoverable_from_existing_bag
+
+frames:
+  map: map
+  odom: odom
+  base: base_link
+  imu: cv7_link
+  front_lidar: hesai_front
+  rear_lidar: hesai_rear
+  center_lidar: hesai_center
+
+existing_inputs:
+  wheel_odom:
+    topic: /motor_driver_node/odom
+    type: nav_msgs/msg/Odometry
+  external_imu:
+    topic: /imu/data
+    type: sensor_msgs/msg/Imu
+    frame_id_observed: cv7_link
+
+hesai_raw_inputs:
+  front_jt128:
+    topic: /hesai/front/lidar_points
+    model: JT128
+    frame_id: hesai_front
+    observed_points_per_scan: 230400
+    ring_range: [0, 127]
+  rear_jt128:
+    topic: /hesai/rear/lidar_points
+    model: JT128
+    frame_id: hesai_rear
+    observed_points_per_scan: 230400
+    ring_range: [0, 127]
+  center_xt32:
+    topic: /hesai/center/lidar_points
+    model: XT32
+    frame_id: hesai_center
+    observed_points_per_scan: 128000
+    ring_range: [0, 31]
+
+canonical_outputs:
+  owner: slam_3d_lidar_ingest
+  point_step_bytes: 24
+  fields:
+    x: {offset: 0, type: FLOAT32}
+    y: {offset: 4, type: FLOAT32}
+    z: {offset: 8, type: FLOAT32}
+    intensity: {offset: 12, type: FLOAT32}
+    offset_time: {offset: 16, type: UINT32, unit: nanoseconds}
+    ring: {offset: 20, type: UINT16}
+    sensor_id: {offset: 22, type: UINT8}
+  time_equation: point_packet_time_equals_header_stamp_plus_offset_time_ns
+  front:
+    topic: /slam_3d/input/hesai_front/points_timed
+    sensor_id: 0
+  rear:
+    topic: /slam_3d/input/hesai_rear/points_timed
+    sensor_id: 1
+  center:
+    topic: /slam_3d/input/hesai_center/points_timed
+    sensor_id: 2
+
+clock_policies:
+  production:
+    policy: sensor_header
+    requirement: common_measured_ptp_domain_for_three_lidars_host_and_imu
+    reject_header_to_ros_delta_s: 0.25
+    note: threshold_check_is_not_proof_of_ptp_lock
+  geoje_legacy_replay:
+    policy: calibrated_sensor_time
+    calibration: fixed_anchor_plus_affine_sensor_clock_fit
+    target: bag_record_time_minus_observed_scan_duration
+    use_sim_time: true
+    requirement: ros2_bag_play_with_clock
+    quality: deterministic_fit_with_unrecoverable_transport_latency
+
+core_multi_lidar_sync:
+  owner: slam_3d_core
+  primary: /slam_3d/input/hesai_center/points_timed
+  auxiliary:
+    - /slam_3d/input/hesai_front/points_timed
+    - /slam_3d/input/hesai_rear/points_timed
+  policy:
+    bounded_queue: true
+    timestamp_sorted_insertion: true
+    consume_each_auxiliary_scan_at_most_once: true
+    production_max_start_skew_s: 0.01
+    reorder_window_s: 0.02
+    auxiliary_missing_decision:
+      - per_auxiliary_timestamp_watermark
+      - bounded_wall_timeout_on_stream_stall
+    cross_topic_primary_progress_is_dropout_proof: false
+    wall_timeout_role: auxiliary_stream_stall_or_end_of_input
+    transform_each_cloud_with_tf_before_merge: true
+    deskew_each_cloud_before_merge: true
+    wheel_interpolate_auxiliary_clouds_to_primary_stamp: true
+    wheel_pose_requirement: exact_or_two_sided_interpolation
+    motion_compensation_failure_policy: drop_auxiliary
+
+diagnostics:
+  ingest: /slam_3d/ingest/health
+  slam: /slam_3d/health
+  required:
+    - contract_status_per_sensor
+    - timestamp_change_count
+    - max_consecutive_equal_timestamps
+    - frame_and_model_profile_status
+    - input_clouds_expected
+    - input_clouds_merged
+    - auxiliary_consumed_missing_stale_and_overflow_counts
+    - auxiliary_duplicate_and_out_of_order_counts
+    - auxiliary_watermark_and_wall_timeout_resolution
+    - inter_lidar_motion_applied_and_dropped_counts
+
+rules:
+  - Do not feed the raw Geoje timestamps directly to IMU deskew.
+  - Do not describe packet timestamps as calibrated per-channel firing times.
+  - Do not use identity extrinsics when a configured LiDAR TF lookup fails.
+  - Do not reuse one auxiliary scan for multiple primary scans.
+  - Preserve the three raw bags and recorded tf_static as evidence.
+  - Exactly one mapping or localization stack may own map-to-odom TF.

@@ -1,0 +1,208 @@
+scan_to_map_icp_node:
+  ros__parameters:
+    use_sim_time: true
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: false
+
+    # XT32-only frontend. JT128 point clouds are deliberately not subscribed.
+    primary_cloud_topic: /slam_3d/input/hesai_center/points_timed
+    secondary_cloud_topic: /slam_3d/input/hesai_front/points_timed
+    tertiary_cloud_topic: /slam_3d/input/hesai_rear/points_timed
+    use_secondary_cloud: false
+    use_tertiary_cloud: false
+    inter_lidar_motion_compensation_enabled: false
+    cloud_subscription_reliable: true
+    cloud_subscription_depth: 10
+    # Offline replay needs enough burst absorption for expensive keyframe and
+    # place-recognition updates. Coverage gates still reject any overflow.
+    cloud_sync_queue_size: 128
+    cloud_processing_period_s: 0.005
+
+    # This profile must remain independent of wheel odometry. With both wheel
+    # features disabled, the node does not create an odometry subscription.
+    wheel_odom_topic: /unused/wheel_odom_disabled
+    wheel_odom_require_expected_frames: true
+    wheel_odom_expected_frame: odom
+    wheel_odom_expected_child_frame: base_link
+    use_wheel_prediction: false
+    # Reuse the last accepted LiDAR pose delta as the scan-to-map initial guess.
+    # The body-z commit constraint below prevents its weak vertical component
+    # from entering the persistent trajectory.
+    use_constant_velocity_prediction: true
+    use_scan_to_scan_prediction: false
+    use_scan_to_scan_fallback: false
+    add_scan_to_scan_fallback_keyframes: false
+    use_motion_prior_fallback: false
+    add_motion_prior_fallback_keyframes: false
+    wheel_odom_buffer_duration_s: 30.0
+    wheel_odom_buffer_max_samples: 10000
+    wheel_odom_max_time_delta_s: 0.25
+    wheel_odom_max_interpolation_gap_s: 0.50
+    wheel_odom_timestamp_reset_threshold_s: 0.5
+
+    # /imu/data is SI sensor_msgs/Imu in cv7_link. The recorded static TF has
+    # identity rotation from base_link to cv7_link, so no axis rotation or unit
+    # normalization is applied. Its periodic gaps are handled by strict scan
+    # quarantine below instead of interpolation across missing measurements.
+    imu_topic: /imu/data
+    imu_require_expected_frame: true
+    imu_expected_frame: cv7_link
+    deskew_enabled: true
+    deskew_wait_for_imu_watermark: true
+    deskew_imu_wait_timeout_s: 0.5
+    deskew_point_time_field: offset_time
+    deskew_point_time_scale: 0.0
+    deskew_max_scan_duration_s: 0.2
+    deskew_max_imu_gap_s: 0.03
+    deskew_imu_buffer_duration_s: 30.0
+    deskew_min_time_ratio: 0.8
+    deskew_time_bin_s: 0.001
+    deskew_angular_velocity_scale: 1.0
+    deskew_imu_to_base_roll_deg: 0.0
+    deskew_imu_to_base_pitch_deg: 0.0
+    deskew_imu_to_base_yaw_deg: 0.0
+    # The recorder has occasional LiDAR/IMU-wide gaps. An undeskewed scan
+    # immediately after one of those gaps can duplicate walls in the map.
+    reject_cloud_on_deskew_failure: true
+
+    # Keep inter-scan gyro prediction disabled: the bounded Geoje ablation made
+    # vertical drift worse. /imu/data reports approximately -g on cv7_link z
+    # while stationary, so flip only the acceleration used by the gravity
+    # constraint. Gyro axes used by point deskew remain unchanged.
+    imu_rotation_prediction_enabled: false
+    imu_rotation_prediction_source: angular_velocity
+    imu_rotation_prediction_max_dt_s: 0.5
+    imu_rotation_prediction_scale: 1.0
+    gravity_roll_pitch_constraint_enabled: true
+    gravity_accel_scale: -1.0
+    gravity_accel_low_pass_alpha: 0.02
+    gravity_accel_time_constant_s: 0.5
+    gravity_accel_min_norm_mps2: 7.5
+    gravity_accel_max_norm_mps2: 12.5
+    gravity_accel_max_age_s: 0.03
+
+    # Keep roll/pitch gravity-aligned, then remove translation normal to the
+    # previous committed body plane. Forward motion on a pitch still changes
+    # map z, so ramps remain observable without accumulating weak-axis drift.
+    planar_pose_constraint_enabled: true
+    planar_pose_max_z_correction_m: 0.0
+    ground_vehicle_motion_constraint_enabled: true
+    ground_vehicle_nominal_max_body_z_step_m: 0.0
+    ground_vehicle_roughness_max_body_z_step_m: 0.0
+
+    imu_roughness_detection_enabled: true
+    imu_roughness_window_s: 0.35
+    imu_roughness_recent_event_window_s: 0.75
+    imu_roughness_angular_velocity_threshold_radps: 1.5
+    imu_roughness_angular_accel_threshold_radps2: 25.0
+    imu_roughness_accel_norm_delta_threshold_mps2: 2.5
+    imu_roughness_linear_jerk_threshold_mps3: 45.0
+    quarantine_keyframes_on_shock: true
+    quarantine_pose_on_shock: false
+    keyframe_quarantine_correction_translation_m: 1.0
+    keyframe_quarantine_correction_rotation_deg: 20.0
+
+    use_tf_transforms: true
+    reject_cloud_on_tf_failure: true
+    registration_method: voxel_surfel
+    robust_registration_enabled: false
+    min_scan_points: 300
+    scan_voxel_leaf_m: 0.30
+    adaptive_scan_voxel_enabled: true
+    adaptive_scan_voxel_leaf_m: 0.20
+    adaptive_scan_voxel_min_points: 1200
+    map_voxel_leaf_m: 0.35
+    local_map_radius_m: 35.0
+    max_local_keyframes: 60
+    min_range_m: 0.8
+    max_range_m: 80.0
+    crop_box_enabled: true
+    crop_min_x: -0.7
+    crop_max_x: 0.7
+    crop_min_y: -0.55
+    crop_max_y: 0.55
+    crop_min_z: -0.8
+    crop_max_z: 0.9
+    keyframe_translation_m: 0.8
+    keyframe_rotation_deg: 8.0
+    max_keyframes: 2000
+    max_path_poses: 20000
+    # Full-cloud serialization is expensive and only the final map is needed
+    # for offline evidence capture.
+    map_publish_period_s: 15.0
+
+    surfel_voxel_size_m: 1.0
+    surfel_min_points_per_voxel: 5
+    surfel_max_planarity_ratio: 0.30
+    surfel_min_tangent_variance: 0.0001
+    surfel_max_plane_distance_m: 0.50
+    surfel_max_center_distance_m: 1.80
+    surfel_min_correspondences: 200
+    surfel_min_correspondence_ratio: 0.08
+    surfel_huber_delta_m: 0.15
+    surfel_max_iterations: 12
+    surfel_max_backtracking_steps: 5
+    surfel_backtracking_factor: 0.5
+    surfel_rotation_convergence_rad: 0.0002
+    surfel_translation_convergence_m: 0.0002
+    surfel_relative_cost_convergence: 0.00001
+    surfel_max_rotation_step_rad: 0.20
+    surfel_max_translation_step_m: 0.50
+    surfel_rotation_scale_m_per_rad: 1.0
+    # The wheel-free bag01 Hessian audit put two useful translational modes at
+    # 0.00058 and 0.00079 relative eigenvalue; 0.001 suppressed actual motion.
+    surfel_relative_eigen_threshold: 0.0003
+    surfel_min_observable_rank: 3
+    surfel_max_quality_rmse_m: 0.40
+    surfel_max_quality_p95_m: 0.80
+
+    # Lightweight editable backend. Loop registration must pass geometric
+    # validation and the new edge must retain a useful Cauchy robust weight.
+    place_recognition_enabled: true
+    place_recognition_periodic_enabled: true
+    place_recognition_require_pose_graph_correction: true
+    place_recognition_periodic_min_interval_s: 3.0
+    place_recognition_relocalization_min_interval_s: 2.0
+    place_recognition_descriptor_bins: 60
+    place_recognition_descriptor_rings: 1
+    place_recognition_min_keyframes: 25
+    place_recognition_exclude_recent_keyframes: 20
+    place_recognition_max_candidates: 8
+    place_recognition_candidate_map_neighbors: 8
+    place_recognition_max_descriptor_distance: 0.25
+    place_recognition_min_inlier_ratio: 0.30
+    place_recognition_max_inlier_rmse_m: 0.90
+    place_recognition_max_pose_jump_m: 5.0
+    place_recognition_max_pose_jump_rotation_deg: 45.0
+    place_recognition_max_yaw_offset_deg: 180.0
+
+    pose_graph_correction_enabled: true
+    pose_graph_planar_correction_enabled: true
+    pose_graph_robust_loop_enabled: true
+    pose_graph_correction_min_keyframes: 10
+    pose_graph_correction_max_translation_m: 5.0
+    pose_graph_correction_max_rotation_deg: 45.0
+    pose_graph_correction_min_interval_s: 2.0
+    pose_graph_optimization_iterations: 40
+    pose_graph_optimization_step: 0.12
+    pose_graph_odom_translation_weight: 1.0
+    pose_graph_odom_rotation_weight: 1.0
+    pose_graph_loop_translation_weight: 2.0
+    pose_graph_loop_rotation_weight: 1.5
+    pose_graph_loop_cauchy_scale: 1.0
+    pose_graph_min_new_loop_robust_weight: 0.05
+    pose_graph_max_iteration_translation_step_m: 0.18
+    pose_graph_max_iteration_rotation_step_deg: 3.0
+    pose_graph_max_loop_residual_before: 15.0
+    pose_graph_max_residual_after: 2.0
+    pose_graph_max_residual_ratio: 1.0
+
+    odom_topic: /slam_3d/frontend/odom
+    path_topic: /slam_3d/frontend/path
+    local_map_topic: /slam_3d/map/active_submap
+    global_map_topic: /slam_3d/map/global_cloud
+    health_topic: /slam_3d/health
+    imu_watermark_topic: /slam_3d/imu_watermark_ns
+    pose_graph_marker_topic: /slam_3d/backend/pose_graph_markers

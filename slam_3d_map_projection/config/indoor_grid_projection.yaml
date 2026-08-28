@@ -1,0 +1,73 @@
+projection:
+  resolution_m: 0.05
+  bounds_quantile_low: 0.001
+  bounds_quantile_high: 0.999
+  initial_padding_m: 1.0
+  output_padding_m: 0.75
+  max_grid_cells: 8000000
+
+  # The optimized trajectory z bootstraps nearby floor candidates. Final point
+  # heights are relative to the locally smoothed, PCA-validated floor layer.
+  floor_min_offset_m: -0.18
+  floor_max_offset_m: 0.12
+  obstacle_min_height_m: 0.12
+  # Provisional upper collision envelope. Replace it after measuring the real
+  # chassis, sensor mast, and underpass clearance; this is not a tuned constant.
+  obstacle_max_height_m: 2.0
+  max_floor_reference_distance_m: 45.0
+
+  floor_min_points_per_cell: 1
+  obstacle_min_points_per_cell: 1
+  obstacle_support_radius_m: 0.12
+  obstacle_min_support_points: 2
+  floor_support_radius_m: 0.40
+  floor_smoothing_sigma_m: 0.30
+  floor_normal_neighbors: 12
+  floor_normal_max_neighbor_distance_m: 0.75
+  floor_normal_max_tilt_deg: 25.0
+  floor_planarity_ratio_max: 0.20
+  floor_surface_spread_min: 0.08
+
+  # Ramps inside the provisional mobility limits remain FREE in the main map.
+  # These values label coherent ramp regions separately in ramp_mask.
+  ramp_min_slope_deg: 3.0
+  ramp_max_slope_deg: 15.0
+  ramp_min_area_m2: 0.50
+  ramp_support_margin_m: 0.20
+  ramp_trajectory_smoothing_m: 0.75
+  ramp_min_length_m: 0.75
+  ramp_min_height_change_m: 0.08
+  ramp_region_radius_m: 0.80
+
+  # Keep this synchronized with the active Nav2 footprint. The optimized yaw is
+  # used to rasterize the full swept rectangle, not a circular centerline tube.
+  robot_footprint_length_m: 1.066
+  robot_footprint_width_m: 0.88
+  trajectory_footprint_margin_m: 0.0
+  # Never infer swept free space across a dropped/reordered pose interval.
+  trajectory_max_segment_xy_m: 0.25
+  trajectory_max_segment_z_m: 0.20
+  trajectory_max_segment_yaw_deg: 45.0
+  trajectory_max_segment_dt_s: 0.50
+  obstacle_keep_distance_to_free_m: 0.80
+  # Reconstruct at most one 5 cm raster gap. Keep robot-footprint inflation in
+  # Nav2, where the configured footprint and inflation layer are reviewable.
+  obstacle_closing_radius_m: 0.05
+  obstacle_dilation_radius_m: 0.0
+
+  # Below-floor returns and floor geometry outside provisional mobility limits
+  # remain UNKNOWN unless the optimized historical footprint crossed them.
+  below_floor_min_points_per_cell: 1
+  below_floor_support_radius_m: 0.12
+  below_floor_min_support_points: 2
+  max_traversable_floor_slope_deg: 15.0
+  # Local PCA plane-normal RMS residual, not raw z standard deviation.
+  max_traversable_floor_roughness_m: 0.08
+
+  # A single 2D map cannot represent stacked floors at the same XY coordinate.
+  single_level_xy_bin_m: 0.25
+  single_level_max_z_span_m: 0.75
+
+  free_value: 254
+  occupied_value: 0
+  unknown_value: 205

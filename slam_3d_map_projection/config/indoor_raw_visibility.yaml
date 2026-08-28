@@ -1,0 +1,48 @@
+raw_visibility:
+  topic: /hesai/center/lidar_points
+  expected_frame_id: hesai_center
+
+  # Captured launch transform T_base_hesai_center. This is validated against
+  # the optimized bag02/bag03 PCD, but remains a field-calibration input.
+  sensor_translation_xyz_m: [0.36, 0.0, 1.5496]
+  sensor_rotation_rpy_deg: [0.0, 0.0, 90.0]
+
+  # Candidate cells are coarse enough to tolerate the merged-map voxel size,
+  # while visibility still uses the native XT32 ring/azimuth measurements.
+  evidence_resolution_m: 0.20
+  height_band_edges_m: [0.12, 0.40, 0.80, 1.20, 2.0]
+  min_range_m: 1.0
+  max_range_m: 45.0
+  azimuth_bin_deg: 0.5
+  azimuth_neighbor_bins: 1
+  vertical_neighbor_rings: 1
+  max_ring_angle_error_deg: 1.5
+
+  # A return near the merged-map surface is a hit. A farther return is a miss
+  # only when it clears the candidate by the configured margin. A nearer return
+  # is occlusion and must never clear the candidate.
+  hit_tolerance_m: 0.30
+  miss_margin_m: 0.45
+  occlusion_margin_m: 0.30
+  min_confirming_hit_scans: 2
+  min_hit_fraction_for_confirmation: 0.20
+  min_contradicting_miss_scans: 10
+  max_hit_fraction_for_contradiction: 0.10
+  contradiction_miss_to_hit_ratio: 4.0
+
+  max_pose_time_offset_s: 0.060
+  max_pose_interpolation_gap_s: 0.25
+  scan_stride: 1
+  raw_point_stride: 1
+
+path_planning:
+  robot_footprint_length_m: 1.066
+  robot_footprint_width_m: 0.88
+  heading_bins: 16
+  translation_step_m: 0.10
+  allow_reverse: true
+  reverse_cost_multiplier: 1.20
+  turn_cost_m: 0.12
+  clearance_cost_weight: 0.03
+  goal_tolerance_m: 0.15
+  max_expansions: 1000000

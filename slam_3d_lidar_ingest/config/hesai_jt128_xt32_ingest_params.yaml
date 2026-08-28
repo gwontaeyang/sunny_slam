@@ -1,0 +1,58 @@
+hesai_pointcloud_ingest:
+  ros__parameters:
+    "front.input_topic": /hesai/front/lidar_points
+    "front.output_topic": /slam_3d/input/hesai_front/points_timed
+    "front.expected_input_frame_id": hesai_front
+    "front.require_expected_input_frame": true
+    "front.model": JT128
+    "front.sensor_id": 0
+    "front.max_ring_id": 127
+    "front.min_points": 200000
+    "front.max_points": 260000
+    "front.clock_domain": ptp_required_unverified
+    "front.clock_policy": sensor_header
+    "front.time_offset_ns": 0
+
+    "rear.input_topic": /hesai/rear/lidar_points
+    "rear.output_topic": /slam_3d/input/hesai_rear/points_timed
+    "rear.expected_input_frame_id": hesai_rear
+    "rear.require_expected_input_frame": true
+    "rear.model": JT128
+    "rear.sensor_id": 1
+    "rear.max_ring_id": 127
+    "rear.min_points": 200000
+    "rear.max_points": 260000
+    "rear.clock_domain": ptp_required_unverified
+    "rear.clock_policy": sensor_header
+    "rear.time_offset_ns": 0
+
+    "center.input_topic": /hesai/center/lidar_points
+    "center.output_topic": /slam_3d/input/hesai_center/points_timed
+    "center.expected_input_frame_id": hesai_center
+    "center.require_expected_input_frame": true
+    "center.model": XT32
+    "center.sensor_id": 2
+    "center.max_ring_id": 31
+    "center.min_points": 100000
+    "center.max_points": 160000
+    "center.clock_domain": ptp_required_unverified
+    "center.clock_policy": sensor_header
+    "center.time_offset_ns": 0
+
+    health_topic: /slam_3d/ingest/health
+    input_depth: 10
+    output_depth: 5
+    input_reliable: true
+    output_reliable: true
+    drop_nonfinite_points: true
+    reject_non_increasing_output_stamp: true
+    reject_clock_misalignment: true
+    max_sensor_header_to_receive_delta_s: 0.25
+    max_points: 500000
+    max_scan_duration_s: 0.2
+    min_finite_point_ratio: 0.9
+    max_header_first_point_delta_s: 0.005
+    timestamp_regression_tolerance_s: 1.0e-9
+    require_monotonic_timestamps: true
+    require_nonzero_duration: true
+    require_header_matches_first_point: true

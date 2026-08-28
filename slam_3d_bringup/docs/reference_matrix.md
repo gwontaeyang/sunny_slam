@@ -1,99 +1,80 @@
-# Large-Scale Outdoor 3D SLAM Reference Matrix
+# Reference Matrix
 
-This is a design reference, not an import plan. The GOLE stack should own the
-pipeline boundaries, topics, map format, health metrics, and downstream TF
-contract even when individual algorithms are prototyped from public work.
+## Hardware And Driver
 
-## Method Comparison
+| Reference | What Is Used |
+|---|---|
+| Hesai ROS Driver 2.0 | Multi-device YAML, PointCloud2 layout, receive-vs-sensor timestamp policy, PTP and packet-loss topics |
+| Hesai LiDAR SDK 2.0 | JT128/XT parsing and the optional corrected firing-time point type |
 
-| Reference | Useful idea | Why it is not enough by itself | GOLE design takeaway |
-| --- | --- | --- | --- |
-| FAST-LIO2 / FAST-LIO family | Real-time tightly-coupled LiDAR-inertial odometry with direct point-to-map updates and Livox-friendly assumptions. | It is primarily an odometry/frontend architecture. Large outdoor operation still needs map lifecycle, loop closure, persistence, health metrics, and navigation integration. | Use an iterated-EKF/direct local-map frontend pattern for the first internal LIO implementation. |
-| LIO-SAM | Factor graph separation between IMU preintegration, LiDAR odometry, GPS, and loop factors. | Its original assumptions around point cloud organization and sensor model are not a direct Mid-360 raw/custom-message fit. | Use its factor separation and keyframe graph layout as backend design reference. |
-| FAST-LIO-SAM variants | Practical combination of FAST-LIO odometry and pose graph optimization. | Public variants differ in quality and are usually glue code around specific forks. | Copy the architectural split, not the dependency graph. |
-| GLIM | Modern range-inertial mapping structure with frontend/backend separation, submaps, and global registration concepts. | It is a large stack with substantial dependencies; using it directly would hide GOLE-specific contracts. | Use it as a reference for submap/global registration and fixed-lag/global optimization boundaries. |
-| KISS-ICP / KISS-SLAM | Simple LiDAR-only odometry and map-closure baselines with ROS 2 usability. | No IMU/wheel coupling, so it is not the final answer for Mid-360 outdoor mapping. | Keep it as an offline geometry smoke-test baseline for bags. |
-| hdl_graph_slam | Classic 3D graph SLAM constraints, including IMU/GPS/floor-style priors. | ROS 1 and spinning-LiDAR era assumptions; not a Livox LIO frontend. | Good source for backend factor types and diagnostic visualizations. |
-| Cartographer | Submap lifecycle, scan-to-submap matching, background constraint building, and map serialization concepts. | It is not a good direct Mid-360 LIO frontend for this project. | Use its submap and background optimization ideas for map storage and loop work scheduling. |
+Observed Geoje messages match the official ROS wrapper layout:
+`x/y/z/intensity/ring/timestamp`, `point_step=26`. The wrapper copies
+`LidarPointXYZIRT.timestamp`; this is packet timestamp in the examined SDK
+parsers. Corrected channel firing time requires the SDK-specific timestamp
+path, not an assumption in the SLAM frontend.
 
-## Architecture Decision
+## Frontend
 
-For very large outdoor areas, build a split system:
+| Reference | Adopted Idea | Current Status |
+|---|---|---|
+| FAST-LIO2 | Iterated error-state LIO and direct map residuals | Architecture target; not implemented |
+| LIO-SAM | Explicit IMU deskew and factor-graph separation | Rotation-only packet deskew implemented |
+| CT-ICP | Continuous-time scan representation for motion distortion | Design reference; current implementation remains gyro-only rotational deskew |
+| DLIO | Direct LiDAR-inertial odometry with continuous-time deskew | Bias/velocity-aware translational deskew remains pending |
+| KISS-ICP | Simple inspectable scan-to-map baseline | GICP baseline implemented |
+| X-ICP | Degeneracy and observable-direction reasoning | Independent surfel solver reports Hessian rank |
+| Wildcat | Continuous-time handling for rough motion | Reference for later translation/bias deskew |
 
-1. **Sensor ingest and calibration layer**
-   - Preserve Livox CustomMsg point timing and source information.
-   - Track front/rear LiDAR, LiDAR-IMU, and base extrinsics separately.
-   - Measure time offsets and packet drops before trying to tune SLAM.
+## Backend
 
-2. **Frontend LIO**
-   - Start with FAST-LIO2-style iterated EKF/direct local-map registration.
-   - Fuse two Mid-360 sensors as two measurement sets against one robot state.
-   - Do not average two independent LIO odometry streams as the production path.
-   - Use wheel odometry as a planar velocity prior and slip diagnostic, not as a hard pose truth.
+| Reference | Adopted Idea | Current Status |
+|---|---|---|
+| Scan Context | Ring/sector place descriptor | Small editable variant implemented |
+| LIO-SAM / GTSAM | Incremental graph with loop factors | Small internal relaxation only |
+| Dynamic Covariance Scaling | Robust loop constraints | Cauchy weighting implemented in baseline |
+| GLIM | Submap-centric large-scale architecture | Planned persistent submap layer |
 
-3. **Submap manager**
-   - Convert stable frontend keyframes into overlapping local submaps.
-   - Store submap clouds, descriptors, poses, and bounding boxes independently.
-   - Publish the active/local map at high rate and global map at low rate.
+## Indoor Terrain And Rough Motion
 
-4. **Backend pose graph**
-   - Add between-keyframe/submap factors from frontend odometry.
-   - Add loop closure factors only after descriptor and geometric verification gates.
-   - Support robust kernels and switchable constraints for bad loops.
-   - Keep optimization metrics: iterations, timing, residuals, accepted/rejected loops.
+| Reference | Adopted Idea | Current Status |
+|---|---|---|
+| Vibration-Aware LIO | Separate shock uncertainty from normal scan matching | Discrete shock/recovery map-mutation gate implemented; point covariance weighting pending |
+| Robot-Centric Elevation Mapping | Gravity-aligned local height evidence with uncertainty | Gravity-aligned keyframe-local evidence implemented; uncertainty propagation pending |
+| GPU Elevation Mapping | Multi-level elevation evidence and traversability products | Design reference for the deferred projection layer |
+| Patchwork++ | Region-wise robust ground segmentation | Design reference; current radial profile classifier is intentionally smaller and editable |
+| TRAVEL | Gravity-aligned local terrain continuity and slope reasoning | Polar local floor/ramp/step evidence implemented |
+| G-VOM | Keep positive/negative obstacle evidence in 3D before projection | Persistent keyframe-reprojected 3D evidence implemented |
+| Fast Staircase Detection and Estimation | Require repeated tread/riser geometry for a stair hypothesis | Conservative repeated-riser candidate label implemented; width, yaw, and staircase instance estimation are pending |
+| Potential Negative Obstacle Detection by Occlusion Labeling | Missing returns need occlusion context | No-return remains unknown; ray/occlusion layer pending |
+| Virtual Surfaces for Negative Obstacle Detection | Confirm risk only after conservative visibility reasoning | Planned downstream negative-obstacle validator |
+| HDIF | Learn terrain difficulty from exteroceptive geometry and proprioceptive experience | Causal LiDAR-preview/IMU-traversal memory implemented; learned predictor pending |
+| TerraPN | Self-supervised terrain cost from robot-terrain interaction | Traversal response is retained separately from geometry; online learning pending |
+| Learning to Reconstruct Safe Terrain | Learn nominal safe geometry and flag departures without manual terrain labels | Reference for later calibrated preview anomaly scoring; current residual is deterministic |
+| Navigating by Touch | Use physical interaction as delayed terrain supervision | Stable-to-recovery traversal association implemented; navigation policy learning pending |
 
-5. **Map persistence and localization**
-   - Store maps as submap tiles plus graph metadata, not one monolithic PCD.
-   - Load only relevant submaps for localization in large sites.
-   - Define a controlled bridge from 3D SLAM pose to the existing 2D Nav2 `/odom`
-     and `map -> odom -> base_link` contract after navigation review.
+## Primary Links
 
-## Outdoor-Specific Risks
-
-- Repetitive structure, open fields, vegetation, and long corridors cause LiDAR
-  degeneracy; the frontend must detect weak directions and inflate covariance.
-- Dual Mid-360 non-overlap or low-overlap mounting makes extrinsic validation
-  harder than ordinary overlapping multi-LiDAR calibration.
-- Large maps fail by memory and retrieval strategy before they fail by point
-  cloud visualization; submap indexing is required from the first design.
-- Dynamic objects should be handled as registration down-weighting/outlier
-  rejection, not by deleting raw data before the LIO frontend.
-- Existing GOLE 2D localization and AMCL can publish the same TF chain expected
-  by Nav2; 3D SLAM must be launched in a mode with explicit TF ownership.
-
-## Validation Datasets
-
-Minimum local dataset ladder:
-
-1. Static dual-Mid-360 plus IMU bag for timestamp, extrinsic, and noise checks.
-2. Single-front Mid-360 loop.
-3. Single-rear Mid-360 loop.
-4. Short dual-Mid-360 loop.
-5. Long outdoor loop with repeated structures.
-6. Open-field or low-feature route for degeneracy.
-7. Rough ground and slope route for roll/pitch and z drift.
-8. One-LiDAR dropout route.
-9. Wheel-slip route.
-10. 30-60 minute memory/runtime route.
-
-Metrics:
-
-- Drift per 100 m and closure error.
-- z drift and roll/pitch stability.
-- Front/rear LiDAR rate, IMU rate, timestamp skew, packet drops.
-- Frontend registration residuals and degeneracy score.
-- Backend optimization time, residual distribution, loop acceptance/rejection.
-- Map point count, submap count, memory use, and global map publish cost.
-
-## References
-
-- Livox Mid-360 specifications: https://www.livoxtech.com/mid-360/specs
-- Livox ROS Driver 2: https://github.com/Livox-SDK/livox_ros_driver2
-- FAST-LIO / FAST-LIO2: https://github.com/hku-mars/FAST_LIO
+- Hesai ROS Driver 2.0: https://github.com/HesaiTechnology/HesaiLidar_ROS_2.0
+- Hesai LiDAR SDK 2.0: https://github.com/HesaiTechnology/HesaiLidar_SDK_2.0
+- FAST-LIO2: https://github.com/hku-mars/FAST_LIO
 - LIO-SAM: https://github.com/TixiaoShan/LIO-SAM
-- GLIM: https://github.com/koide3/glim
+- CT-ICP: https://arxiv.org/abs/2109.12979
+- DLIO: https://arxiv.org/abs/2203.03749
 - KISS-ICP: https://github.com/PRBonn/kiss-icp
-- KISS-SLAM: https://github.com/PRBonn/kiss-slam
-- hdl_graph_slam: https://github.com/koide3/hdl_graph_slam
-- Cartographer algorithm walkthrough:
-  https://google-cartographer-ros.readthedocs.io/en/latest/algo_walkthrough.html
+- GLIM: https://github.com/koide3/glim
+- X-ICP: https://arxiv.org/abs/2211.16335
+- Wildcat: https://arxiv.org/abs/2205.12595
+- Dynamic Covariance Scaling: https://doi.org/10.1109/ICRA.2013.6630557
+- Vibration-Aware LIO: https://arxiv.org/abs/2507.04311
+- Robot-Centric Elevation Mapping: https://www.research-collection.ethz.ch/items/c14beb8a-7dc9-4413-90f4-ffe814108ab9
+- GPU Elevation Mapping: https://arxiv.org/abs/2204.12876
+- Patchwork++: https://arxiv.org/abs/2207.11919
+- TRAVEL: https://arxiv.org/abs/2206.03190
+- G-VOM: https://arxiv.org/abs/2109.13176
+- Fast Staircase Detection and Estimation: https://arxiv.org/abs/2211.00610
+- Potential Negative Obstacle Detection by Occlusion Labeling: https://www.ri.cmu.edu/publications/potential-negative-obstacle-detection-by-occlusion-labeling/
+- Virtual Surfaces for Negative Obstacle Detection: https://arxiv.org/abs/2010.16018
+- HDIF: https://arxiv.org/abs/2209.10788
+- TerraPN: https://arxiv.org/abs/2202.12873
+- Self-Supervised Traversability Prediction by Learning to Reconstruct Safe Terrain: https://arxiv.org/abs/2208.01329
+- Navigating by Touch: https://doi.org/10.1007/s10514-021-10013-w

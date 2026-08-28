@@ -1,185 +1,277 @@
 # slam_3d_bringup
 
-GOLE-owned 3D SLAM architecture and bringup contract for very large outdoor
-mapping with two Livox Mid-360 LiDARs, the existing wheel odometry topic, and
-the existing external IMU topic.
+This package wires the current 3D SLAM development stack for two Hesai JT128
+sensors and one Hesai XT32. The default launch is inert: it does not start the
+hardware driver, publish static TF, run SLAM, or take ownership of navigation
+TF until each corresponding argument is enabled.
 
-This package is not an open-source SLAM wrapper. Public SLAM projects are used
-only as references for algorithm and system design. The first editable GOLE
-learning implementation lives in `slam_3d_core` as a direct C++ scan-to-map
-ICP/GICP frontend.
+## Verified Geoje Input
 
-## Architecture Decision
+`02_samsung_geoje` contains:
 
-Use a split large-scale mapping pipeline:
+| Sensor | Raw topic | Frame | Points | Rings |
+|---|---|---|---:|---:|
+| front JT128 | `/hesai/front/lidar_points` | `hesai_front` | 230,400 | 128 |
+| rear JT128 | `/hesai/rear/lidar_points` | `hesai_rear` | 230,400 | 128 |
+| center XT32 | `/hesai/center/lidar_points` | `hesai_center` | 128,000 | 32 |
+
+All three use `sensor_msgs/msg/PointCloud2` with a 26-byte input layout:
+`x/y/z/intensity FLOAT32`, `ring UINT16`, and `timestamp FLOAT64` at byte 18.
+One timestamp is repeated for 256 consecutive points. It is packet time, not
+calibrated channel firing time.
+
+The bags do not have one verified LiDAR/IMU clock domain. JT128, XT32, and IMU
+timestamps use incompatible epochs or rates depending on the recording.
+Constant offsets cannot repair this. Existing bag replay is therefore an
+approximate geometry experiment, not evidence of tightly synchronized LIO.
+
+## Package Roles
+
+`slam_3d_lidar_ingest`:
+
+- validates frame, fields, model point count, ring range, timestamps, and scan
+  duration;
+- converts each sensor separately to
+  `header.stamp + offset_time:uint32 nanoseconds`;
+- publishes packet-time quality diagnostics;
+- does not transform, merge, register, or integrate IMU.
+
+`slam_3d_core`:
+
+- supports an XT32-only indoor profile and a dual-JT128 indoor profile in
+  addition to the legacy three-LiDAR development topology;
+- uses XT32 as the primary trigger in the legacy three-LiDAR topology and
+  matches front/rear JT128 scans from bounded queues, consuming each once;
+- transforms each sensor to `base_link`, packet-level deskews it, and uses
+  timestamp-interpolated wheel odom to move auxiliary clouds to the XT32 time;
+- rejects a sensor cloud when TF is missing in the production profile;
+- runs editable ICP, GICP, or voxel-surfel scan-to-map registration plus
+  keyframes, shock quarantine, place recognition, and a small pose graph;
+- uses one cloud-bounded causal IMU snapshot for deskew, roughness, and optional
+  gyro prediction. Watermark waiting covers all enabled IMU consumers and the
+  latest selected auxiliary point-time end. The validated indoor bag profiles
+  request RELIABLE IMU QoS.
+
+## Main Files
+
+- `launch/hesai_jt128_xt32_3d_slam.launch.py`
+- `config/hesai_jt128_xt32_topic_contract.yaml`
+- `config/indoor_pipeline.yaml`
+- `config/large_scale_outdoor_pipeline.yaml`
+- `config/hesai_jt128_xt32_driver.template.yaml`
+- `config/wheel_imu_ekf_3d_params.yaml`
+- `docs/indoor_outdoor_profile_contract.md`
+- `rviz/hesai_jt128_xt32_3d_slam.rviz`
+
+The driver template is intentionally not launchable as-is. Device IPs, host
+interface, correction files, firetime files, and PTP behavior must be filled
+from the commissioned installation. The devices must also be configured to
+send to distinct host UDP ports; the template assigns front/rear/center to
+2368/2369/2370 because the Hesai SDK creates a receive socket per LiDAR.
+
+## Inspect Launch
+
+```bash
+ros2 launch slam_3d_bringup hesai_jt128_xt32_3d_slam.launch.py --show-args
+```
+
+Safe defaults:
+
+- `run_hesai_driver:=false`
+- `run_lidar_ingest:=false`
+- `run_static_tf:=false`
+- `run_wheel_imu_ekf:=false`
+- `run_learning_slam_core:=false`
+- `learning_slam_publish_tf:=false`
+- `run_rviz:=false`
+
+The Hesai bringup's `imu_topic` defaults to the normalized front JT128 stream,
+`/slam_3d/input/hesai_front/imu`. The core profile should also enable
+`imu_require_expected_frame` for the commissioned IMU frame before deskew is
+used live.
+
+For indoor development, select one of the explicit sensor profiles. Both use
+`/imu/data`, disable wheel prediction, enable SE(3) keyframes and overlapping
+submaps, and leave dynamic-object processing outside the pipeline. The current
+profiles require `cv7_link` and use its native XYZ convention with identity
+IMU-to-base rotation. The older `04_gangnam` roll-180 workaround remains in
+archived replay configs only. Physical mounting, time offset, Xsens, and other
+IMU frames require separate calibration and profiles:
+
+```bash
+# One XT32
+ros2 launch slam_3d_bringup hesai_jt128_xt32_3d_slam.launch.py \
+  run_learning_slam_core:=true \
+  learning_slam_sensor_profile:=indoor_xt32_single
+
+# Two JT128 sensors
+ros2 launch slam_3d_bringup hesai_jt128_xt32_3d_slam.launch.py \
+  run_learning_slam_core:=true \
+  learning_slam_sensor_profile:=indoor_dual_jt128
+```
+
+These commands still do not start the Hesai hardware driver or publish static
+TF unless those launch arguments are enabled explicitly.
+
+The launch argument `pipeline_config_file` defaults to `auto`. It reports
+`indoor_pipeline.yaml` for either indoor sensor profile and keeps
+`large_scale_outdoor_pipeline.yaml` for `custom`. The indoor profiles also
+replace the forwarded wheel topic with `/unused/wheel_odom_disabled`, force
+wheel prediction off, and force inter-LiDAR compensation to use IMU rotation.
+They also ignore `run_wheel_imu_ekf:=true`, so an indoor profile cannot create
+a wheel subscription through either estimator path. Indoor and outdoor tuning
+remains in separate profile files while registration, keyframes, submaps,
+place recognition, and pose-graph code stay in the shared `slam_3d_core`
+package.
+The XT32 indoor default uses voxel-surfel registration with a bounded
+LiDAR-only constant-velocity initial guess. For a slower quality-reference A/B
+run, override `learning_slam_params_file` with
+`slam_3d_core/config/indoor_xt32_single_gicp_quality_params.yaml`; neither file
+subscribes to wheel odometry.
+
+Both indoor profiles enable an IMU shock state machine and persistent 3D
+terrain evidence. A detected impact suppresses the constant-velocity seed and
+prevents initialization, keyframe, submap, loop, and map mutation until the
+configured stable-scan recovery count is reached; registration output remains
+available as high-covariance odometry for diagnostics, while active-shock poses
+are omitted from `/slam_3d/frontend/path`. `/slam_3d/terrain/evidence` uses PointXYZI intensity
+labels `1=floor`, `2=ramp`, `3=positive step`, `4=observed drop`, and
+`5=staircase`. Staircase evidence requires at least three height/depth-consistent
+risers in one gravity-aligned radial profile and the same independent-viewpoint
+confirmation as every persistent label. A missing return is not a drop, and
+this topic is intentionally not projected to a 2D navigation grid in the
+current indoor SLAM stage.
+
+Ramp candidates also pass a robust gravity-relative local-plane gate for
+surface length, lateral width, residual RMSE, and inlier ratio. The matching
+PointXYZRGB topic `/slam_3d/terrain/evidence_colored` uses green for floor,
+blue for ramp, orange for positive step, red for directly observed lower
+support, and purple for staircase. The supplied RViz profile enables this
+semantic cloud by default.
+
+The RViz profile also enables `/slam_3d/terrain/support_evidence`, which preserves
+gray-zone evidence as a five-state support surface: unresolved, probable support,
+confirmed support, probable hazard, and confirmed hazard. Dark/light green and
+blue/cyan distinguish confirmed/probable floor and ramp; yellow marks probable
+hazard and gray remains unresolved. This does not weaken the existing confirmed
+semantic topic. Probable support requires direct proximity to confirmed support,
+cannot propagate through other probable points, and is exported as a nonzero
+continuous traversal cost rather than binary free space.
+
+The same profiles publish observer-only preview memory on
+`/slam_3d/terrain/preview_evidence`. Intensity encodes
+`10 * terrain_label + state`, with state `1=tentative`,
+`2=geometry_confirmed`, `3=traversal_confirmed`, and
+`4=unsafe_traversal_conflict`. LiDAR can create the candidate before the robot
+reaches it; a preview lead-time diagnostic requires that its first observation
+was at least 0.75 m ahead and within 1.00 m laterally of the heading axis.
+`/imu/data` then records stable response at the accepted pose or localizes a
+translational shock by timestamp interpolation between bounded stable poses.
+Yaw-only motion cannot create a terrain shock, and an event without valid
+stable bounds is discarded. Quarantine and rejected registrations add a
+persistent traversal continuity break so replay cannot connect their stable
+endpoints with a fabricated straight passage. This topic is rebuilt after
+pose-graph correction, but it cannot alter registration, keyframes, loops,
+poses, or map output in the current stage.
+A stronger pulse updates both the response score and physical event time. Any
+separately rejected or pose-quarantined scan invalidates that pending bridge.
+Primary queue overflow marks the first surviving cloud with a persistent break,
+but only when a pending forward cloud was omitted; a stale arrival that removes
+itself does not fabricate a gap. Sparse and deskew-failed clouds still advance
+the primary timestamp watermark, and a late timestamp is rejected before any
+IMU or terrain state update. Point-time bounds remain active with deskew off,
+so post-header IMU impacts are attributed to the cloud that actually observed
+them. Gravity and roughness use the same dispatch-time sensor snapshot.
+Point-time bounds outside the positive `deskew_max_scan_duration_s`, or with
+either endpoint farther than that duration from the cloud header, are excluded
+from IMU/shock watermark advancement. Gravity-only operation waits to the cloud
+stamp independently of the deskew wait switch. Stale queue victims are
+identified by the last dispatched primary stamp even when they entered before
+the queue became full.
+`imu_subscription_reliable=true` is valid only when the live publisher offers
+RELIABLE QoS; verify the deployed `/imu/data` endpoint before bringup.
+
+## Geoje Bag Replay
+
+Use the legacy ingest and core profiles only for the existing recordings:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/gole_ws/install/setup.bash
+
+ros2 launch slam_3d_bringup hesai_jt128_xt32_3d_slam.launch.py \
+  use_sim_time:=true \
+  pipeline_mode:=bag_replay \
+  run_lidar_ingest:=true \
+  lidar_ingest_params_file:=$(ros2 pkg prefix slam_3d_lidar_ingest)/share/slam_3d_lidar_ingest/config/geoje_legacy_bag_ingest_params.yaml \
+  run_learning_slam_core:=true \
+  learning_slam_params_file:=$(ros2 pkg prefix slam_3d_core)/share/slam_3d_core/config/geoje_legacy_scan_to_map_params.yaml
+```
+
+In a separate shell, play a bag directory with `/clock`:
+
+```bash
+ros2 bag play <geoje_bag_directory> --clock
+```
+
+Keep `run_hesai_driver:=false` and `run_static_tf:=false` for bag replay. The
+bag already supplies raw clouds and recorded `/tf_static`.
+
+The bounded derived Geoje bag under `~/analysis_outputs/` omits `/tf_static`.
+Its reproducible replay script therefore sets `run_static_tf:=true` and uses the
+recorded transforms copied into launch arguments. Those transforms are replay
+evidence, not a verified live calibration.
+
+## Current Geoje Evidence
+
+The current 24 s candidate is `v24`, using fixed affine legacy replay time,
+per-auxiliary timestamp watermarks, packet-level rotation deskew,
+timestamp-interpolated wheel prediction, and inter-LiDAR wheel-time motion
+compensation. It accepted all 72 XT32 scans with no ingest rejection or
+primary queue overflow and produced 114,322 map points. A repeat run matched
+all 72 poses to `7.028e-10 m` translation RMSE. The no-inter-LiDAR-motion
+`v14` result remains the control because wheel odometry is not ground truth.
+
+Results and PCD-only bag directories:
 
 ```text
-Dual Mid-360 raw data + IMU + wheel odom
-  -> time/extrinsic validation
-  -> per-point deskew
-  -> FAST-LIO2-style internal LIO frontend
-  -> keyframes
-  -> submap manager
-  -> pose graph backend
-  -> loop closure
-  -> persistent submap map store
-  -> optional localization/Nav2 bridge
+~/analysis_outputs/slam_3d/03_hesai_geoje_ingest/comparisons/
+~/analysis_outputs/slam_3d/03_hesai_geoje_ingest/pcd_full_maps/
 ```
 
-The first production-oriented direction is:
+## Live Production Gate
 
-- **Frontend**: tightly coupled LiDAR-inertial odometry with an iterated EKF,
-  direct local-map registration, per-point deskew, and wheel odometry as a
-  planar velocity/slip prior.
-- **Dual LiDAR fusion**: two Mid-360 streams are two measurement sets against
-  one robot state. Do not run two independent LIO odometries and average them
-  for production.
-- **Backend**: keyframe/submap pose graph with robust loop closure, submap
-  storage, runtime metrics, and bounded memory.
-- **Map format**: submaps plus descriptors and graph metadata, not one global
-  dense PCD.
-- **Downstream integration**: 3D SLAM owns `map -> odom -> base_link` only in
-  explicit mapping/localization modes where the existing 2D localization/AMCL
-  owners are disabled.
+Before enabling the Hesai driver and production ingest:
 
-Detailed design:
+1. Verify correction and firetime files for each serial number.
+2. Verify the three LiDAR topics and frame IDs independently.
+3. Verify PTP lock, offset, drift, and reset diagnostics for all LiDARs and the
+   host.
+4. Verify IMU timestamps are in the same measured clock domain.
+5. Calibrate `base_link -> hesai_*` and `base_link -> IMU` extrinsics.
+6. Record a static bag and confirm zero-motion map thickness and timestamp
+   residuals.
+7. Record a low-speed loop before rough construction-site motion.
 
-- `docs/large_scale_outdoor_architecture.md`
-- `docs/downstream_impact.md`
-- `config/large_scale_outdoor_pipeline.yaml`
-- `config/dual_mid360_topic_contract.yaml`
-- `docs/reference_matrix.md`
-
-## Existing GOLE Inputs
-
-| Input | Topic | Current owner | Use in 3D SLAM |
-| --- | --- | --- | --- |
-| Wheel odometry | `/motor_driver_node/odom` | `gole_core/device/driver/motor_driver` | Planar velocity prior, slip detection, sanity reference |
-| IMU | `/imu/data` | external/MicroStrain IMU stack | Propagation, gravity, deskew |
-| Front Mid-360 | `/slam_3d/input/mid360_front/livox` | Livox driver config | Raw CustomMsg stream |
-| Rear Mid-360 | `/slam_3d/input/mid360_rear/livox` | Livox driver config | Raw CustomMsg stream |
-
-`slam_3d_livox_ingest` now validates both raw streams and publishes separate
-`points_timed` clouds. These retain Livox `offset_time`, source identity,
-reflectivity, tag, and line. They are the input to the current learning core.
-Lossy `points_debug` streams remain visualization and legacy-dataset paths.
-The future tightly coupled frontend should consume the same validated timing
-contract without concatenating the sensors before deskew.
-
-## Why Not Simple PointCloud Merge
-
-The existing `lidar_merger` and `lidar_preprocessing` packages are useful after
-registration, for perception, or for 2D localization products. They are not
-safe before the 3D LIO frontend because `lidar_preprocessing` converts clouds
-to `pcl::PointXYZ`, and LIO needs per-point time/source/intensity metadata for
-deskew and proper measurement weighting.
-
-For the dual Mid-360 frontend, preserve:
-
-- source sensor id,
-- per-point timestamp or time offset,
-- intensity/reflectivity,
-- tag/line fields when available,
-- calibrated extrinsics,
-- source-specific covariance/health state.
-
-## Launch Usage
-
-The launch file is intentionally conservative. By default it starts no SLAM
-backend, no placeholder TF, no EKF, and no RViz:
-
-```bash
-ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py
-```
-
-Useful development checks:
-
-```bash
-ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py --show-args
-ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_static_tf:=true
-ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_wheel_imu_ekf:=true
-ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_mid360_ingest:=true
-ros2 launch slam_3d_bringup dual_mid360_3d_slam.launch.py run_learning_slam_core:=true
-```
-
-Core arguments:
-
-- `pipeline_mode`: label for the current development phase. Default
-  `architecture_only`.
-- `pipeline_config_file`: path to `large_scale_outdoor_pipeline.yaml`.
-- `run_livox_driver`: include Livox ROS Driver 2 after the two-device config is
-  ready. Default `false`.
-- `run_mid360_ingest`: validate raw `CustomMsg` timing and emit canonical
-  front/rear `points_timed` clouds. Default `false`; the executable is available
-  only when `livox_ros_driver2` was present while building
-  `slam_3d_livox_ingest`.
-- `run_wheel_imu_ekf`: run a reference wheel/IMU EKF. Default `false`.
-- `run_learning_slam_core`: run `slam_3d_core/scan_to_map_icp_node`.
-  Default `false`.
-- `learning_slam_publish_tf`: allow the learning core to publish TF. Default
-  `false`; keep it off unless existing localization/AMCL TF owners are
-  disabled.
-- `run_static_tf`: publish placeholder base-to-LiDAR TF. Default `false`.
-- `run_rviz`: open the development RViz view. Default `false`.
-
-Placeholder extrinsics:
-
-- Front: `front_x:=0.45 front_y:=0.0 front_z:=0.52 front_yaw:=0.0`
-- Rear: `rear_x:=-0.45 rear_y:=0.0 rear_z:=0.52 rear_yaw:=3.141592653589793`
-
-Replace these with measured CAD/calibration values before any bag validation.
-The stock Livox `msg_MID360_launch.py` uses custom messages but one shared
-LiDAR topic. A dual unit must use `multi_topic=1` and map each device topic to
-the explicit front/rear raw topics.
+The current production clock check only compares header and ROS receive time
+against a threshold. It does not prove PTP lock. The official Hesai wrapper
+must be extended or its PTP topics monitored before claiming synchronized LIO.
 
 ## TF Ownership
 
-Existing stacks already use the standard navigation chain:
-
-```text
-map -> odom -> base_link
-```
-
-Important owners:
-
-- `gole_localization/odom_estimation` publishes `/odom` and `odom -> base_link`.
-- `gole_apart` AMCL/localization owns `map -> odom` during 2D navigation.
-- Nav2 components consume `map`, `odom`, `base_link`, and `/odom`.
-
-Therefore 3D SLAM mapping must run in a mode where existing localization/AMCL
-TF publishers are disabled, or it must publish topic-only outputs without TF.
-
-## Validation Ladder
-
-1. Static dual-Mid-360 + IMU bag for timestamp and extrinsic checks.
-2. Single-front Mid-360 LIO bag.
-3. Single-rear Mid-360 LIO bag.
-4. Short dual-Mid-360 loop bag.
-5. Long outdoor loop with repeated structures.
-6. Open-field or low-feature route for degeneracy.
-7. Rough ground/slope route for roll, pitch, and z drift.
-8. One-LiDAR dropout route.
-9. Wheel-slip route.
-10. 30-60 minute runtime/memory route.
-
-Required plots and metrics:
-
-- XY and 3D trajectory.
-- Top/down and side map projections.
-- z drift, roll/pitch stability, and closure error.
-- Frontend residuals and degeneracy score.
-- Loop candidate, accepted/rejected, inlier ratio, fitness, and transform gate.
-- Backend optimization timing and residual distributions.
-- Submap count, memory, map publish cost, and real-time factor.
+All outputs remain under `/slam_3d/...`. `publish_tf` is false by default.
+The current learning core can publish only a direct `map -> base_link`
+prototype transform; it does not yet provide the production
+`map -> odom -> base_link` split. During mapping, exactly one stack may own the
+map/base TF path. Existing localization and AMCL TF owners must be disabled
+before either prototype or future backend TF publication is enabled.
 
 ## References
 
-- Livox Mid-360 specs: https://www.livoxtech.com/mid-360/specs
-- Livox ROS Driver 2: https://github.com/Livox-SDK/livox_ros_driver2
-- FAST-LIO / FAST-LIO2: https://github.com/hku-mars/FAST_LIO
+- Hesai ROS Driver 2.0: https://github.com/HesaiTechnology/HesaiLidar_ROS_2.0
+- Hesai LiDAR SDK 2.0: https://github.com/HesaiTechnology/HesaiLidar_SDK_2.0
+- FAST-LIO2: https://github.com/hku-mars/FAST_LIO
 - LIO-SAM: https://github.com/TixiaoShan/LIO-SAM
-- GLIM: https://github.com/koide3/glim
-- KISS-ICP: https://github.com/PRBonn/kiss-icp
-- hdl_graph_slam: https://github.com/koide3/hdl_graph_slam
-- Cartographer algorithm walkthrough:
-  https://google-cartographer-ros.readthedocs.io/en/latest/algo_walkthrough.html
+- HDIF: https://arxiv.org/abs/2209.10788
+- TerraPN: https://arxiv.org/abs/2202.12873
+- Self-Supervised Traversability Prediction by Learning to Reconstruct Safe Terrain: https://arxiv.org/abs/2208.01329

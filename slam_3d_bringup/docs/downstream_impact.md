@@ -72,7 +72,7 @@ Impact:
 Impact:
 
 - This remains useful for perception and 2D localization products.
-- It is not a raw Mid-360 LIO input path.
+- It is not a raw Hesai JT128/XT32 LIO input path.
 
 ### `lidar_preprocessing`
 
@@ -101,6 +101,73 @@ Rule:
 - Keep all 3D SLAM outputs under `/slam_3d/...` until the bridge to existing
   navigation topics is intentionally designed and tested.
 
+## Indoor Terrain Evidence
+
+- `/slam_3d/terrain/evidence` is a map-frame PointXYZI evidence cloud, not a
+  navigation grid. Intensity labels are floor (`1`), ramp (`2`), positive step
+  (`3`), directly observed drop (`4`), and repeated-riser staircase (`5`).
+- Missing LiDAR returns remain unknown. They must not be converted directly to
+  lethal cost because range limits, glass, grazing incidence, and occlusion are
+  ambiguous.
+- Pose-graph corrections rebuild the evidence cloud from keyframe-local labels,
+  so downstream consumers should use the latest transient-local publication.
+- The deferred projection stage must apply robot footprint, clearance, slope,
+  step-height, persistence, and unknown-space policy before publishing a Nav2
+  layer. It must also keep localization geometry separate from navigation-only
+  ground removal.
+- Staircase evidence is a geometric no-go/semantic candidate for a wheeled
+  robot, not a claim that the staircase is traversable or completely observed.
+  The current detector requires repeated risers in one radial profile but does
+  not yet estimate stair width, yaw, landing extent, or a staircase instance.
+- Shock-active frontend odometry is diagnostic output with inflated covariance.
+  Those poses are intentionally absent from `/slam_3d/frontend/path`; consumers
+  must not infer that every odometry sample is committed SLAM trajectory state.
+- `/slam_3d/terrain/preview_evidence` is a separate observer-only PointXYZI
+  cloud. Intensity is `10 * terrain_label + preview_state`; it distinguishes a
+  LiDAR-only tentative candidate, repeated-geometry confirmation, actual robot
+  traversal, and an unsafe traversal conflict.
+- Preview lead time is reported only for a candidate first observed at least
+  0.75 m ahead and within 1.00 m laterally of the heading axis. The current
+  traversal test uses a 0.75 m XY disk and must be replaced by a calibrated
+  footprint or wheel-contact model before a planner treats the result as
+  vehicle-specific experience.
+- A translational IMU shock is timestamp-interpolated between valid stable
+  pre-impact and recovery poses. Yaw-only motion is excluded, and an event
+  without bounded time and travel distance is discarded rather than assigned
+  to the recovery endpoint. Quarantine or a rejected scan inserts a persistent
+  continuity break so replay cannot create a straight passage across unknown
+  motion. Keyframe-local geometry and traversal samples are interpolated and
+  replayed after a pose-graph correction.
+- Deskew, terrain response, and optional gyro prediction consume the same IMU
+  prefix truncated at the maximum required point-time horizon across the
+  selected LiDAR set. Watermark waiting applies to these consumers even when
+  deskew is disabled, and decoded point-time bounds keep post-header impacts in
+  the correct cloud interval. The maximum duration must be positive; bounds
+  outside it, or with either endpoint farther than one duration from the header,
+  are excluded from temporal state even when deskew later reports them as
+  invalid. A magnitude-scaled floating-point tolerance covers epoch-time ULPs
+  at the exact boundary without adding a physical timing margin. Gravity
+  selection is copied at the same dispatch boundary, always
+  waits to the cloud stamp in gravity-only mode regardless of the deskew wait
+  switch, and is reused through keyframe terrain classification. Diagnostics
+  expose `imu_snapshot_end_stamp_ns` and `imu_snapshot_sample_count`.
+- The indoor profiles request RELIABLE `/imu/data` because a missing gyro sample
+  changes the deskewed cloud. This requires a publisher that offers RELIABLE
+  QoS; it is incompatible with a best-effort-only publisher.
+- A rejected or pose-quarantined scan invalidates a pending impact bridge. A
+  stronger later pulse updates both the retained response score and timestamp.
+- Primary queue overflow tags the first surviving cloud with a continuity
+  break (`primary_cloud_gap_before=true`) only if a pending forward cloud was
+  omitted. A stale arrival that is eventually evicted does not create a false
+  gap, including when it first entered an underfull queue.
+  Every primary callback that reaches processing, including sparse and
+  deskew-failed scans, advances the monotonic watermark; non-increasing stamps
+  are rejected before temporal IMU or terrain state can rewind.
+- Preview memory must remain outside Nav2 cost and loop-edge injection until
+  terrain ground truth, directional ledge identity, and confidence calibration
+  are validated. Its first backend use should be a diagnostic or conflict veto,
+  not a hard positive constraint derived again from the same LiDAR geometry.
+
 ## Integration Modes
 
 ### Architecture-only mode
@@ -112,22 +179,26 @@ Rule:
 
 ### Sensor recording mode
 
-- Run Livox driver and IMU/wheel recording.
+- Run the verified Hesai three-device driver and IMU/wheel recording.
 - No 3D SLAM TF.
-- Record raw Livox custom topics, validated `points_timed`, ingest diagnostics,
-  IMU, wheel odom, `/tf`, and `/tf_static`. Debug PointCloud2 is optional.
+- Record raw PointCloud2, raw packet/PTP/packet-loss topics when available,
+  validated `points_timed`, ingest diagnostics, IMU, wheel odom, `/tf`, and
+  `/tf_static`.
 
 ### Mapping mode
 
 - Disable existing rover localization TF owner.
 - Disable AMCL/localization stack.
-- 3D SLAM backend owns `map -> odom -> base_link`.
+- Target production 3D SLAM backend owns `map -> odom -> base_link`.
+- Current `slam_3d_core` is still a learning frontend and, when explicitly
+  enabled, publishes a direct `map -> base_link` prototype transform only.
 - Publish navigation bridge only after review.
 
 ### Localization mode
 
 - Load submap store and graph metadata.
-- Publish `map -> odom -> base_link` only as the selected localization owner.
+- A future localization backend may publish `map -> odom -> base_link` only as
+  the selected localization owner.
 - Keep AMCL disabled unless explicitly comparing localization stacks offline.
 
 ## Review Checklist Before Publishing `/odom`

@@ -5,9 +5,74 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+
+def _parameter_overrides(context):
+    overrides = {}
+
+    for name in (
+        "primary_cloud_topic",
+        "secondary_cloud_topic",
+        "tertiary_cloud_topic",
+        "wheel_odom_topic",
+        "imu_topic",
+        "inter_lidar_motion_compensation_source",
+        "map_frame",
+        "odom_frame",
+        "base_frame",
+        "pose_graph_marker_topic",
+    ):
+        if LaunchConfiguration(name).perform(context).strip():
+            overrides[name] = LaunchConfiguration(name)
+
+    for name, value_type in (
+        ("use_sim_time", bool),
+        ("use_secondary_cloud", bool),
+        ("use_tertiary_cloud", bool),
+        ("cloud_subscription_reliable", bool),
+        ("cloud_subscription_depth", int),
+        ("use_wheel_prediction", bool),
+        ("publish_tf", bool),
+    ):
+        if LaunchConfiguration(name).perform(context).strip():
+            overrides[name] = ParameterValue(
+                LaunchConfiguration(name),
+                value_type=value_type,
+            )
+
+    if "odom_frame" in overrides:
+        overrides["wheel_odom_expected_frame"] = LaunchConfiguration(
+            "odom_frame"
+        )
+    if "base_frame" in overrides:
+        overrides["wheel_odom_expected_child_frame"] = LaunchConfiguration(
+            "base_frame"
+        )
+    registration_method = LaunchConfiguration("registration_method").perform(
+        context
+    ).strip()
+    if registration_method:
+        overrides["registration_method"] = registration_method
+    return overrides
+
+
+def _launch_node(context):
+    return [
+        Node(
+            package="slam_3d_core",
+            executable="scan_to_map_icp_node",
+            name="scan_to_map_icp_node",
+            output=LaunchConfiguration("output"),
+            parameters=[
+                LaunchConfiguration("params_file"),
+                _parameter_overrides(context),
+            ],
+        )
+    ]
 
 
 def generate_launch_description():
@@ -22,63 +87,99 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_sim_time",
-            default_value="false",
-            description="Use simulation time",
+            default_value="",
+            description="Optional override; empty preserves params_file",
+        ),
+        DeclareLaunchArgument(
+            "pose_graph_marker_topic",
+            default_value="",
+            description="Optional override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "primary_cloud_topic",
-            default_value="/slam_3d/input/mid360_front/points_debug",
-            description="Primary Mid-360 PointCloud2 debug stream",
+            default_value="",
+            description="Optional primary cloud override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "secondary_cloud_topic",
-            default_value="/slam_3d/input/mid360_rear/points_debug",
-            description="Secondary Mid-360 PointCloud2 debug stream",
+            default_value="",
+            description="Optional secondary cloud override; empty preserves params_file",
+        ),
+        DeclareLaunchArgument(
+            "tertiary_cloud_topic",
+            default_value="",
+            description="Optional tertiary cloud override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "use_secondary_cloud",
-            default_value="true",
-            description="Fuse the latest secondary cloud when timestamp skew is acceptable",
+            default_value="",
+            description="Optional front JT128 toggle; empty preserves params_file",
+        ),
+        DeclareLaunchArgument(
+            "use_tertiary_cloud",
+            default_value="",
+            description="Optional rear JT128 toggle; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "cloud_subscription_reliable",
-            default_value="false",
-            description="Use reliable QoS for the primary cloud when its publisher is reliable",
+            default_value="",
+            description="Optional cloud QoS override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "cloud_subscription_depth",
-            default_value="5",
-            description="Primary and secondary cloud subscription history depth",
+            default_value="",
+            description="Optional cloud history override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "wheel_odom_topic",
-            default_value="/motor_driver_node/odom",
-            description="Existing GOLE wheel odometry topic used as a motion prior",
+            default_value="",
+            description="Optional wheel odometry override; empty preserves params_file",
+        ),
+        DeclareLaunchArgument(
+            "use_wheel_prediction",
+            default_value="",
+            description="Optional wheel prediction toggle; empty preserves params_file",
+        ),
+        DeclareLaunchArgument(
+            "inter_lidar_motion_compensation_source",
+            default_value="",
+            description=(
+                "Optional inter-LiDAR motion source override; empty preserves "
+                "params_file"
+            ),
         ),
         DeclareLaunchArgument(
             "imu_topic",
-            default_value="/imu/data",
-            description="Existing external IMU topic; currently recorded for diagnostics",
+            default_value="",
+            description="Optional IMU override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "registration_method",
-            default_value="gicp",
-            description="Registration method: gicp or icp",
+            default_value="",
+            description=(
+                "Optional registration override: gicp, icp, or voxel_surfel. "
+                "Empty preserves params_file."
+            ),
         ),
         DeclareLaunchArgument(
             "map_frame",
-            default_value="map",
-            description="Map frame for prototype odometry and map clouds",
+            default_value="",
+            description="Optional map frame override; empty preserves params_file",
+        ),
+        DeclareLaunchArgument(
+            "odom_frame",
+            default_value="",
+            description="Optional odometry frame override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "base_frame",
-            default_value="base_link",
-            description="Robot base frame",
+            default_value="",
+            description="Optional robot base frame override; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "publish_tf",
-            default_value="false",
-            description="Publish map -> base_link TF. Keep false with existing localization/AMCL.",
+            default_value="",
+            description="Optional TF toggle; empty preserves params_file",
         ),
         DeclareLaunchArgument(
             "output",
@@ -87,43 +188,4 @@ def generate_launch_description():
         ),
     ]
 
-    node = Node(
-        package="slam_3d_core",
-        executable="scan_to_map_icp_node",
-        name="scan_to_map_icp_node",
-        output=LaunchConfiguration("output"),
-        parameters=[
-            LaunchConfiguration("params_file"),
-            {
-                "use_sim_time": ParameterValue(
-                    LaunchConfiguration("use_sim_time"),
-                    value_type=bool,
-                ),
-                "primary_cloud_topic": LaunchConfiguration("primary_cloud_topic"),
-                "secondary_cloud_topic": LaunchConfiguration("secondary_cloud_topic"),
-                "use_secondary_cloud": ParameterValue(
-                    LaunchConfiguration("use_secondary_cloud"),
-                    value_type=bool,
-                ),
-                "cloud_subscription_reliable": ParameterValue(
-                    LaunchConfiguration("cloud_subscription_reliable"),
-                    value_type=bool,
-                ),
-                "cloud_subscription_depth": ParameterValue(
-                    LaunchConfiguration("cloud_subscription_depth"),
-                    value_type=int,
-                ),
-                "wheel_odom_topic": LaunchConfiguration("wheel_odom_topic"),
-                "imu_topic": LaunchConfiguration("imu_topic"),
-                "registration_method": LaunchConfiguration("registration_method"),
-                "map_frame": LaunchConfiguration("map_frame"),
-                "base_frame": LaunchConfiguration("base_frame"),
-                "publish_tf": ParameterValue(
-                    LaunchConfiguration("publish_tf"),
-                    value_type=bool,
-                ),
-            },
-        ],
-    )
-
-    return LaunchDescription(declarations + [node])
+    return LaunchDescription(declarations + [OpaqueFunction(function=_launch_node)])

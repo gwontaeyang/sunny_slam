@@ -1,0 +1,337 @@
+profile: gole_hesai_indoor_lidar_imu_no_wheel_v1
+
+purpose:
+  environment: indoor_building_and_industrial_space
+  expected_geometry:
+    - repeated_corridors
+    - doors_and_narrow_passages
+    - planar_walls_floors_and_ceilings
+    - occasional_stairs_or_ramps
+  sensors:
+    lidar_profiles:
+      - single_hesai_xt32
+      - dual_hesai_jt128
+    imu: /imu/data
+  excluded_estimator_inputs:
+    - wheel_odometry
+  excluded_processing:
+    - dynamic_object_detection
+    - object_tracking
+  goal: editable_indoor_lidar_imu_3d_slam
+
+architecture:
+  shared_core:
+    package: slam_3d_core
+    ownership:
+      - point_time_deskew
+      - scan_to_local_submap_registration
+      - se3_keyframes
+      - overlapping_submaps
+      - place_recognition
+      - robust_pose_graph_correction
+      - imu_shock_state_and_map_mutation_quarantine
+      - persistent_3d_terrain_evidence
+      - observer_only_terrain_preview_and_traversal_memory
+    environment_independent: true
+  indoor_profile_layer:
+    ownership:
+      - sensor_topology
+      - topic_selection
+      - registration_parameters
+      - keyframe_and_submap_scale
+      - loop_acceptance_thresholds
+      - replay_quality_gates
+  outdoor_profile_layer:
+    status: hold
+    shared_core_changes_must_remain_backward_compatible: true
+
+development_workflow:
+  shared_core_source_of_truth: slam_3d_core
+  shared_core_edit_policy: single_owner_per_worktree
+  parallel_change_isolation: separate_git_worktree_and_branch
+  profile_only_parallel_edits:
+    - indoor_profile_files
+    - outdoor_profile_files
+    - profile_specific_replay_and_validation_artifacts
+  core_integration_gate:
+    - explicit_diff_review
+    - shared_core_build_and_tests
+    - indoor_profile_regression
+    - outdoor_profile_regression_when_resumed
+  prohibited:
+    - duplicated_indoor_and_outdoor_core_source_trees
+    - concurrent_uncoordinated_edits_to_shared_core_in_one_worktree
+
+frames:
+  global: map
+  continuous: odom
+  base: base_link
+  lidar:
+    front: hesai_front
+    rear: hesai_rear
+    center: hesai_center
+  imu_observed: cv7_link
+
+inputs:
+  raw_clouds:
+    front: /hesai/front/lidar_points
+    rear: /hesai/rear/lidar_points
+    center: /hesai/center/lidar_points
+  canonical_clouds:
+    front: /slam_3d/input/hesai_front/points_timed
+    rear: /slam_3d/input/hesai_rear/points_timed
+    center: /slam_3d/input/hesai_center/points_timed
+  imu: /imu/data
+  imu_qos:
+    validated_bag_offer: reliable
+    requested_by_indoor_profiles: reliable
+    live_publisher_verification_required: true
+  wheel_odom: disabled
+
+sensor_profiles:
+  indoor_xt32_single:
+    primary: center_xt32
+    auxiliary: []
+    core_params: slam_3d_core/config/indoor_xt32_single_params.yaml
+    quality_reference_core_params: slam_3d_core/config/indoor_xt32_single_gicp_quality_params.yaml
+    wheel_prediction: false
+    inter_lidar_motion_compensation: false
+  indoor_dual_jt128:
+    primary: front_jt128
+    auxiliary: [rear_jt128]
+    core_params: slam_3d_core/config/indoor_dual_jt128_params.yaml
+    wheel_prediction: false
+    inter_lidar_motion_compensation: imu_rotation_only
+    production_scan_start_tolerance_s: 0.015
+    note: translation_between_asynchronous_lidar_starts_is_not_compensated
+
+frontend:
+  deskew:
+    source: /imu/data
+    required_frame: cv7_link
+    imu_to_base_rpy_deg: [0.0, 0.0, 0.0]
+    axis_convention: native_xyz_with_identity_base_link_to_cv7_link_rotation
+    axis_convention_verification: gangnam_20260824_173117_bounded_ab
+    legacy_roll180_policy: archived_dataset_specific_replay_only
+    physical_extrinsic_and_time_offset_status: not_field_calibrated
+    not_transferable_to:
+      - xsens_link
+      - other_imu_mounts
+    per_point_time_field: offset_time
+    imu_snapshot_policy: causal_prefix_through_required_cloud_end
+    shared_snapshot_consumers: [deskew, roughness, imu_rotation_prediction]
+    watermark_scope: every_enabled_cloud_bound_imu_consumer
+    multi_lidar_horizon: maximum_selected_sensor_point_time_end
+    rotation: gyro_integration
+    translation: unavailable_without_velocity_state
+    reject_on_insufficient_imu_coverage: true
+    maximum_imu_gap_s: 0.03
+  prediction:
+    wheel: disabled
+    lidar_constant_velocity:
+      status: candidate_for_single_xt32
+      source: last_two_accepted_lidar_poses
+      bounded_per_scan_translation_m: 0.30
+      bounded_per_scan_rotation_deg: 10.0
+  shock_policy:
+    source: decoded_point_time_scan_interval_imu_metrics
+    phases: [stable, shock, recovering]
+    suppress_constant_velocity_during_shock: true
+    quarantine_persistent_map_mutation: true
+    publish_registered_pose_during_quarantine: true
+    odometry_covariance_during_quarantine: inflated
+    omit_quarantined_poses_from_frontend_path: true
+    recovery_requires_consecutive_stable_scans: true
+  accelerometer_attitude_constraint:
+    default_status: disabled_pending_field_calibration
+    required_before_enabling:
+      - physical_imu_to_base_extrinsic
+      - accelerometer_bias
+      - dynamic_acceleration_rejection
+      - slope_dataset_ab_validation
+  registration:
+    realtime_candidate: voxel_surfel_scan_to_local_submap
+    quality_reference: gicp_scan_to_local_submap
+    required_diagnostics:
+      - registration_runtime_ms
+      - fitness
+      - inlier_ratio
+      - inlier_rmse_m
+      - correction_translation_m
+      - correction_rotation_deg
+      - observable_rank
+      - residual_distribution
+      - pose_graph_optimization_runtime_ms
+      - pose_graph_mean_iteration_runtime_ms
+      - pose_graph_solver_status
+      - pose_graph_convergence_reason
+
+mapping:
+  spatial_mode: se3
+  keyframes:
+    triggers:
+      - translation
+      - yaw_rotation
+      - vertical_translation
+      - roll_pitch_rotation
+  submaps:
+    enabled: true
+    overlap_required: true
+    active_registration_target: local_compatible_submaps
+  place_recognition:
+    descriptor: scan_context_family
+    target: submap
+    temporal_exclusion: required
+    consecutive_geometric_confirmation: required
+  pose_graph:
+    dimensions: se3
+    edge_types:
+      - frontend_between
+      - verified_loop
+    robust_loop_kernel: cauchy
+    commit_only_when_objective_improves: true
+  terrain_evidence:
+    frame: map
+    classification_frame: keyframe_local_yaw_neutral_gravity
+    source: terrain_specific_high_resolution_keyframe_points
+    imu_gravity_required: true
+    pose_graph_update: reproject_local_labels_with_corrected_keyframe_pose
+    labels:
+      unknown: 0
+      floor: 1
+      ramp: 2
+      positive_step: 3
+      observed_drop: 4
+      staircase: 5
+    minimum_independent_viewpoint_confirmations: 2
+    minimum_per_view_dominant_label_confidence: 0.67
+    minimum_winning_label_confidence: 0.67
+    ceiling_seed_rejection: enabled_by_height_above_base_origin
+    floor_seed_policy: supported_sliding_height_cluster_near_base_reference
+    contradiction_policy: independent_viewpoint_vote_can_revoke_previous_label
+    no_return_policy: unknown_not_drop
+    observed_drop_semantics: directly_observed_lower_support_only
+    staircase_pattern_status: repeated_consistent_riser_evidence
+    ramp_geometry_gate:
+      stage_1: coherent_gravity_aligned_radial_slope_run
+      stage_2: robust_local_3d_plane_support
+      required_support: [point_count, physical_length, lateral_width]
+      quality_gates: [gravity_relative_slope, plane_rmse, inlier_ratio]
+    staircase_traversability_status: deferred
+    downstream_projection_status: experimental_offline_continuous_support_cost
+    semantic_rgb:
+      floor: [105, 190, 105]
+      ramp: [45, 165, 255]
+      positive_step: [255, 165, 35]
+      observed_drop: [235, 55, 55]
+      staircase: [190, 90, 245]
+    support_surface:
+      topic: /slam_3d/terrain/support_evidence
+      states: [unresolved, probable_support, confirmed_support, probable_hazard, confirmed_hazard]
+      support_probability_semantics: empirical_independent_view_vote_ratio_not_calibrated_posterior
+      probable_support_requires_direct_confirmed_anchor: true
+      probable_support_recursive_propagation: prohibited
+      any_hazard_vote_vetoes_support: true
+      projection: continuous_cost_separate_from_trinary_occupancy
+      robot_footprint_and_dynamics_included: false
+  terrain_preview_memory:
+    status: observer_only
+    geometry_source: 3d_lidar_radial_profile_and_multiview_voxel_evidence
+    candidate_filter: non_floor_label_or_high_frequency_floor_residual
+    stages: [tentative, geometry_confirmed, traversal_confirmed]
+    passage_association: swept_xy_footprint_with_vertical_gate
+    minimum_ahead_distance_m: 0.75
+    maximum_lateral_distance_m: 1.00
+    response_source: single_imu_data_stream
+    shock_binding: timestamp_interpolated_between_valid_stable_endpoints
+    stronger_pulse_policy: update_score_and_physical_timestamp_together
+    rejected_pose_policy: invalidate_pending_shock_bridge
+    omitted_motion_policy: persistent_continuity_break_no_straight_chord
+    primary_queue_overflow_policy: tag_first_surviving_cloud_with_continuity_break
+    non_increasing_primary_stamp_policy: reject_before_imu_or_slam_state_update
+    unsafe_labels: [observed_drop, staircase]
+    unsafe_crossing_policy: conflict_not_confirmation
+    pose_graph_edge_mutation: prohibited_in_observer_stage
+    future_loop_role: diagnostic_then_conflict_veto_only
+    intensity_encoding: ten_times_terrain_label_plus_preview_state
+
+outputs:
+  frontend_odom: /slam_3d/frontend/odom
+  frontend_path: /slam_3d/frontend/path
+  active_submap: /slam_3d/map/active_submap
+  global_map: /slam_3d/map/global_cloud
+  terrain_evidence: /slam_3d/terrain/evidence
+  terrain_evidence_colored: /slam_3d/terrain/evidence_colored
+  terrain_support_evidence: /slam_3d/terrain/support_evidence
+  terrain_preview_evidence: /slam_3d/terrain/preview_evidence
+  pose_graph_markers: /slam_3d/backend/pose_graph_markers
+  health: /slam_3d/health
+
+validation:
+  current_dataset: 04_gangnam
+  raw_data_policy: preserve_read_only
+  replay_inputs:
+    - selected_lidar_topics_only
+    - /imu/data
+  explicitly_not_replayed:
+    - wheel_odometry
+  production_vs_replay_overrides:
+    - subscriber_queue_depth
+    - startup_clock_alignment_tolerance
+    - bag_only_dual_lidar_scan_start_tolerance
+  quality_gates:
+    - no_wheel_subscription
+    - no_primary_cloud_queue_overflow
+    - near_complete_imu_deskew_coverage
+    - reliable_imu_subscription_when_publisher_contract_supports_it
+    - zero_causal_imu_snapshot_horizon_violations
+    - bounded_registration_runtime_at_sensor_rate
+    - registration_acceptance_and_rejection_reason_distribution
+    - trajectory_xyz_and_roll_pitch_stability
+    - imu_shock_event_and_map_quarantine_timeline
+    - terrain_label_counts_and_spatial_review
+    - terrain_preview_lead_time_and_traversal_response_review
+    - timestamped_gravity_alignment_availability
+    - terrain_conflicted_voxel_count
+    - no_unobserved_void_promoted_to_drop
+    - map_overlap_visual_review
+    - loop_candidate_accept_reject_audit
+    - pre_and_post_pose_graph_residual_review
+
+known_limits:
+  - cv7_physical_extrinsic_not_field_calibrated
+  - lidar_to_imu_time_offset_not_yet_field_calibrated
+  - gyro_only_rotation_deskew_without_bias_or_translation_state
+  - no_tightly_coupled_lidar_inertial_error_state_filter
+  - no_ground_truth_trajectory_in_04_gangnam
+  - dual_jt128_translation_between_scan_starts_is_uncompensated
+  - merged_dual_lidar_cloud_does_not_preserve_per_sensor_ray_identity
+  - staircase_traversability_and_footprint_cost_projection_not_yet_implemented
+  - no_labeled_stair_or_drop_ground_truth_in_04_gangnam
+  - staircase_label_is_a_radial_repeated_riser_candidate_without_width_or_instance_estimation
+  - terrain_support_projection_is_offline_and_not_yet_integrated_as_a_nav2_costmap_layer
+  - lidar_only_drop_detection_cannot_guarantee_all_negative_obstacles
+  - terrain_step_and_drop_labels_are_approach_direction_dependent_until_ledge_instances_exist
+  - terrain_response_is_robot_and_speed_dependent_and_not_a_place_identity_by_itself
+
+references:
+  - name: LIO-SAM
+    url: https://arxiv.org/abs/2007.00258
+  - name: FAST-LIO2
+    url: https://arxiv.org/abs/2107.06829
+  - name: M-LOAM
+    url: https://arxiv.org/abs/2010.14294
+  - name: Scan_Context_Plus_Plus
+    url: https://arxiv.org/abs/2109.13494
+  - name: KISS-ICP
+    url: https://arxiv.org/abs/2209.15397
+  - name: Vibration-Aware_LIO
+    url: https://arxiv.org/abs/2507.04311
+  - name: X-ICP
+    url: https://arxiv.org/abs/2211.16335
+  - name: TRAVEL
+    url: https://arxiv.org/abs/2206.03190
+  - name: Fast_Staircase_Detection_and_Estimation
+    url: https://arxiv.org/abs/2211.00610
+  - name: G-VOM
+    url: https://arxiv.org/abs/2109.13176

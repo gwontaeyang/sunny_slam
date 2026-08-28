@@ -1,0 +1,95 @@
+scan_to_map_icp_node:
+  ros__parameters:
+    use_sim_time: true
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: false
+
+    primary_cloud_topic: /slam_3d/input/hesai_center/points_timed
+    secondary_cloud_topic: /slam_3d/input/hesai_front/points_timed
+    tertiary_cloud_topic: /slam_3d/input/hesai_rear/points_timed
+    use_secondary_cloud: true
+    use_tertiary_cloud: true
+    cloud_subscription_reliable: true
+    cloud_subscription_depth: 5
+    # 5 s timeout at 0.5x replay can retain roughly 50 primary scans at 10 Hz.
+    cloud_sync_queue_size: 64
+
+    # Geoje bag record/callback timestamps have much larger transport skew than
+    # a commissioned PTP system. These values are replay salvage settings.
+    max_secondary_stamp_delta_s: 0.08
+    max_auxiliary_stamp_delta_s: 0.08
+    # At 0.5x replay, the observed 1.7 s primary gap spans 3.4 s wall time.
+    cloud_sync_wait_timeout_s: 5.0
+    cloud_sync_reorder_window_s: 0.02
+    cloud_processing_period_s: 0.005
+
+    wheel_odom_topic: /motor_driver_node/odom
+    wheel_odom_require_expected_frames: true
+    wheel_odom_expected_frame: odom
+    wheel_odom_expected_child_frame: base_link
+    imu_topic: /imu/data
+    use_wheel_prediction: true
+    use_constant_velocity_prediction: true
+    wheel_odom_buffer_duration_s: 30.0
+    wheel_odom_buffer_max_samples: 5000
+    # The source bag contains verified 1.05-1.50 s odometry publication gaps.
+    # Interpolate only for this legacy replay; production keeps the strict
+    # 0.15/0.25 s limits in scan_to_map_icp_params.yaml.
+    wheel_odom_max_time_delta_s: 1.6
+    wheel_odom_max_interpolation_gap_s: 1.6
+    wheel_odom_timestamp_reset_threshold_s: 0.5
+    use_tf_transforms: true
+    reject_cloud_on_tf_failure: true
+
+    deskew_enabled: true
+    inter_lidar_motion_compensation_enabled: true
+    inter_lidar_motion_compensation_source: wheel_odom
+    inter_lidar_motion_compensation_max_dt_s: 0.08
+    inter_lidar_imu_rotation_scale: 1.0
+    inter_lidar_gap_recovery_hypothesis_enabled: false
+    inter_lidar_gap_recovery_hypothesis_min_gap_s: 0.5
+    inter_lidar_gap_recovery_hypothesis_min_score_improvement_ratio: 0.02
+    inter_lidar_motion_failure_policy: drop_auxiliary
+    deskew_point_time_field: offset_time
+    deskew_point_time_scale: 0.0
+    deskew_max_scan_duration_s: 0.2
+    deskew_max_imu_gap_s: 0.05
+    # Offline registration can lag simulated time by several seconds.
+    deskew_imu_buffer_duration_s: 30.0
+    deskew_min_time_ratio: 0.5
+    deskew_time_bin_s: 0.001
+    deskew_angular_velocity_scale: 1.0
+    # v11 tested quaternion deltas but increased max-iteration exits and runtime.
+    # Keep the implementation available while retaining the v10 wheel-yaw prior.
+    imu_rotation_prediction_enabled: false
+    imu_rotation_prediction_source: orientation
+    imu_rotation_prediction_max_dt_s: 2.0
+    imu_rotation_prediction_scale: 1.0
+    imu_orientation_prediction_max_time_delta_s: 0.05
+    reject_cloud_on_deskew_failure: false
+
+    registration_method: gicp
+    # One merged scan contains 588,800 raw points. The measured 0.25 m
+    # downsample still retained about 27,600 points and a two-stage GICP did
+    # not complete within one minute. Keep this replay baseline bounded while
+    # preserving the production profile separately.
+    max_icp_iterations: 15
+    robust_registration_enabled: false
+    min_scan_points: 200
+    scan_voxel_leaf_m: 0.6
+    map_voxel_leaf_m: 0.6
+    local_map_radius_m: 30.0
+    max_local_keyframes: 30
+    min_range_m: 0.5
+    max_range_m: 80.0
+    crop_box_enabled: true
+    map_publish_period_s: 0.5
+
+    odom_topic: /slam_3d/frontend/odom
+    path_topic: /slam_3d/frontend/path
+    local_map_topic: /slam_3d/map/active_submap
+    global_map_topic: /slam_3d/map/global_cloud
+    health_topic: /slam_3d/health
+    imu_watermark_topic: /slam_3d/imu_watermark_ns
