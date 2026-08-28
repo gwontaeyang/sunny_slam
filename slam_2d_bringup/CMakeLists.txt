@@ -15,6 +15,10 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}/
 )
 
+install(DIRECTORY docs
+  DESTINATION share/${PROJECT_NAME}/
+)
+
 install(DIRECTORY scripts
   DESTINATION share/${PROJECT_NAME}/
   USE_SOURCE_PERMISSIONS
@@ -23,11 +27,16 @@ install(DIRECTORY scripts
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
   set(ament_cmake_xmllint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+  ament_add_pytest_test(
+    test_slam_roughness_launch
+    test/test_slam_roughness_launch.py
+  )
 endif()
 
 ament_package()

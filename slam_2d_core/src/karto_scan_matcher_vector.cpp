@@ -4,7 +4,7 @@
  * LocalizedRangeScanVector specialization from libkartoSlamToolbox.
  */
 
-#include "slam_2d_core/roughness_anchor_slam_toolbox.hpp"
+#include "slam_2d_core/karto_scan_matcher_vector.hpp"
 
 #include <cassert>
 

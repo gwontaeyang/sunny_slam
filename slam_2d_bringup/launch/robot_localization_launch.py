@@ -7,6 +7,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -38,6 +39,12 @@ def generate_launch_description():
         description='Output destination (screen or log)'
     )
 
+    declare_use_sim_time = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='false',
+        description='Use the ROS simulation clock'
+    )
+
     # EKF Localization Node
     ekf_filter_node = Node(
         package='robot_localization',
@@ -46,6 +53,12 @@ def generate_launch_description():
         output=LaunchConfiguration('output'),
         parameters=[
             LaunchConfiguration('config_file'),
+            {
+                'use_sim_time': ParameterValue(
+                    LaunchConfiguration('use_sim_time'),
+                    value_type=bool,
+                ),
+            },
         ],
         remappings=[
             ('odom0', '/motor_driver_node/odom'),
@@ -57,5 +70,6 @@ def generate_launch_description():
         declare_config_file,
         declare_node_name,
         declare_output,
+        declare_use_sim_time,
         ekf_filter_node,
     ])
