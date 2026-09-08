@@ -241,7 +241,7 @@ def generate_launch_description():
         default='false')
     use_roughness_innovation_slam_toolbox = LaunchConfiguration(
         'use_roughness_innovation_slam_toolbox',
-        default='false')
+        default='true')
     roughness_innovation_mode = LaunchConfiguration(
         'roughness_innovation_mode',
         default='observe')
@@ -635,10 +635,10 @@ def generate_launch_description():
 
     declare_use_roughness_innovation_slam_toolbox = DeclareLaunchArgument(
         'use_roughness_innovation_slam_toolbox',
-        default_value='false',
+        default_value='true',
         description=(
-            'Use the experimental IMU-window plus scan-match innovation SLAM '
-            'frontend; disabled until bag validation is complete'
+            'Use custom 2D SLAM in observe mode by default. Set false for '
+            'stock Toolbox or before selecting the experimental anchor node'
         )
     )
     declare_roughness_innovation_mode = DeclareLaunchArgument(
