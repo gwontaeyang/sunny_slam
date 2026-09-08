@@ -1,183 +1,148 @@
-# GOLE Dual Mid-360 Large-Scale Outdoor 3D SLAM Architecture
+# Large-Scale Outdoor 3D SLAM Architecture
 
-## Objective
+## Scope
 
-Build a GOLE-owned 3D SLAM stack for very large outdoor environments using:
+The current robot uses two Hesai JT128 sensors, one Hesai XT32, wheel odometry,
+and an external IMU. The target environment is a large outdoor construction
+site with intermittent shocks, wheel slip, repeated structures, and long loops.
 
-- Two Livox Mid-360 LiDARs.
-- Existing wheel odometry from `/motor_driver_node/odom`.
-- Existing external IMU from `/imu/data`.
+The implementation is intentionally split into inspectable layers:
 
-This package is the contract and bringup shell for that stack. It should not be
-treated as a wrapper around a third-party SLAM backend.
+1. hardware driver;
+2. input contract and time normalization;
+3. multi-LiDAR queue synchronization;
+4. per-sensor transform and deskew;
+5. scan-to-local-map frontend;
+6. submaps and place recognition;
+7. robust pose graph and map persistence.
 
-## Target Pipeline
+## Sensor Boundary
+
+The official Hesai ROS 2 wrapper publishes all three sensors as PointCloud2.
+The Geoje data uses the same field layout for JT128 and XT32, but their point
+counts and ring ranges differ. `slam_3d_lidar_ingest` validates those
+model-specific constraints and emits one canonical cloud per sensor.
+
+It intentionally does not merge LiDARs. Merging before TF and deskew would make
+one cloud contain points acquired in different frames and time intervals.
+
+Canonical packet-time equation:
 
 ```text
-Mid-360 front raw  ─┐
-                   ├─ sensor ingest ─ time/extrinsic validation ─┐
-Mid-360 rear raw   ┘                                             │
-                                                                  ├─ LIO frontend
-/imu/data ───────────────────── IMU propagation / deskew ─────────┤
-                                                                  │
-/motor_driver_node/odom ─────── wheel velocity/slip prior ────────┘
-
-LIO frontend ─ keyframes ─ submap manager ─ pose graph backend ─ map store
-                       │                       │
-                       │                       └─ loop closures / graph metrics
-                       └─ local odometry / local map / degeneracy metrics
-
-map store ─ localization mode ─ controlled bridge to Nav2 odom/TF contract
+t_packet = cloud.header.stamp + offset_time * 1e-9
 ```
 
-## Module Boundaries
+This is not yet a channel firing-time equation. The observed Hesai timestamp is
+repeated for 256 points. A production wrapper should publish SDK-corrected
+firing time if channel-level deskew is required.
 
-### 1. Sensor Ingest
+## Time Architecture
 
-Responsibilities:
+Production requires a common measured clock domain across:
 
-- Receive each Mid-360 stream independently.
-- Preserve Livox per-point offset time and any tag/line/intensity fields.
-- Validate `timebase`, point count, finite ratio, offset ordering, scan
-  duration, and per-sensor packet time progression.
-- Publish separate canonical PointCloud2 streams with
-  `header.stamp=timebase+measured_sensor_offset` and unchanged nanosecond
-  `offset_time`. This is a lossless timing boundary, not front/rear fusion.
-- Record packet counts, header stamps, hardware stamps, and drop counters.
+- front JT128;
+- rear JT128;
+- center XT32;
+- host ROS clock;
+- external IMU.
 
-Implemented boundary:
+The implementation currently checks header-to-receive delta and monotonicity,
+but that is not proof of PTP lock. PTP status, offset, rate, and resets must be
+monitored independently.
 
-- Package: `slam_3d_livox_ingest`
-- Input: two `livox_ros_driver2/msg/CustomMsg` topics
-- Output: two `/slam_3d/input/.../points_timed` topics
-- Health: `/slam_3d/ingest/health`
+The Geoje bags violate the common-clock requirement. Their bounded replay
+profile fits a fixed affine conversion from each sensor header clock to bag
+record time minus observed scan duration. Fixed anchors remove callback-order
+jitter and the fitted scale models local sensor-clock drift. Transport latency,
+recorder latency, and true LiDAR-to-IMU offset remain unknown. Use it for
+geometry, repeatability, and robustness experiments only.
 
-The Livox driver remains an external hardware dependency. Dataset-only builds
-still compile and test the time-contract library while omitting the message
-adapter executable.
+## Multi-LiDAR Synchronization
 
-Non-goals:
+XT32 is the trigger sensor because it provides the center 360-degree stream.
+Each JT128 has a bounded queue. For every XT32 scan, the frontend:
 
-- No PointXYZ conversion before LIO.
-- No naive front/rear cloud concatenation as the primary LIO input.
-- No 2D LaserScan projection before mapping.
+1. inserts every stream in timestamp order and counts reordering;
+2. removes JT128 messages that are irrecoverably older than the allowed window;
+3. selects and consumes the nearest front and rear start stamps exactly once;
+4. uses each auxiliary sensor's timestamp watermark plus a bounded reorder
+   window to decide that a match can no longer arrive;
+5. if an auxiliary stream stops, uses primary-sensor time progress beyond a
+   dropout horizon to resolve the missing input deterministically;
+6. retains wall timeout only for the final primary scan or complete stream
+   stall, then records degraded input;
+7. waits for a wheel timestamp watermark before requiring exact/interpolated
+   wheel brackets for inter-LiDAR motion compensation.
 
-### 2. Calibration And Time Validation
+This replaces the old latest-secondary snapshot behavior, which could reuse one
+scan more than once or miss a delayed scan.
 
-Responsibilities:
+## Frontend Order
 
-- Maintain `base_link -> mid360_front_link`, `base_link -> mid360_rear_link`,
-  `base_link -> imu_link`, and LiDAR-to-LiDAR extrinsics.
-- Measure front/rear LiDAR-to-IMU and wheel-to-IMU timing offsets.
-- Refuse high-confidence SLAM evaluation until timestamp skew is measured.
+For every selected cloud:
 
-Large outdoor mapping will hide small calibration errors until loops are long.
-The first milestone is therefore not mapping, but repeatable static and short
-loop bags that prove timing and extrinsics.
+1. look up `base_link <- sensor_frame`;
+2. reject that sensor cloud if TF is unavailable;
+3. parse `offset_time`;
+4. transform sensor-frame points to `base_link`;
+5. integrate base-frame gyro samples across the packet-time interval;
+6. rotate points to that sensor scan's reference time.
 
-### 3. Frontend LIO
+After per-sensor deskew, wheel odom is interpolated at the auxiliary and XT32
+start stamps. Each available auxiliary cloud is transformed from its acquisition
+base pose into the XT32 base pose. Only then are clouds concatenated,
+body-cropped, range-filtered, voxelized, and registered to the local map.
 
-Recommended first implementation:
+Current deskew is rotation-only. Full construction-site robustness requires
+velocity, bias, gravity, and translation propagation in an error-state LIO.
 
-- FAST-LIO2-style iterated EKF.
-- Direct point-to-local-map residuals.
-- IMU propagation and per-point deskew.
-- Two LiDAR measurement batches update one robot state.
-- Wheel odometry provides planar velocity prior and slip detection.
+## Registration And Shock Handling
 
-The frontend publishes local odometry and local map products, but it should not
-claim global consistency. It must expose covariance/degeneracy so the backend
-can decide how strongly to trust each keyframe edge.
+The editable baseline supports ICP, GICP, and a direct voxel-surfel
+point-to-plane scan-to-local-map implementation with:
 
-### 4. Submap Manager
+- wheel odometry and constant-velocity initial guesses;
+- optional IMU rotation prediction;
+- robust trimmed refinement;
+- correction magnitude and overlap checks;
+- IMU roughness detection;
+- pose and keyframe quarantine during shocks;
+- scan-context-family place candidates;
+- geometric loop verification;
+- a small robust pose-graph relaxation.
 
-Responsibilities:
+The Geoje bounded replay currently selects voxel-surfel. GICP remains the
+production-profile default until a synchronized live commissioning dataset
+supports a broader A/B decision.
 
-- Convert stable keyframes into overlapping submaps.
-- Downsample submaps independently.
-- Attach descriptors and bounding boxes.
-- Keep the active local submap hot in memory and older submaps tile-indexed.
+## Production Target
 
-Large sites should not be handled as one dense PCD. Submap storage is a first
-class requirement, not a later optimization.
+The next frontend should be an iterated error-state LIO with position, velocity,
+orientation, accelerometer bias, gyroscope bias, and gravity. Optional
+calibration states can include per-LiDAR time offsets and extrinsics after
+observability is established.
 
-### 5. Pose Graph Backend
+The backend should operate on persistent overlapping submaps, use verified loop
+factors with robust kernels, and report solver convergence, timing, residuals,
+and accepted/rejected loop evidence.
 
-Responsibilities:
+## Required Validation
 
-- Add odometry factors from frontend keyframes/submaps.
-- Add loop factors only after descriptor retrieval and geometric verification.
-- Use robust kernels and switchable constraints.
-- Publish optimization timing, residuals, node/edge counts, and loop stats.
+1. Synthetic field, frame, ring, point-count, and queue tests.
+2. Static Geoje contract replay.
+3. Center/front/rear single-sensor geometry maps.
+4. Three-LiDAR map with packet deskew on/off.
+5. Shock-segment trajectory and map-thickness ablation.
+6. Repeated-area loop closure before/after overlays.
+7. LiDAR dropout, timestamp reset, and TF-missing tests.
+8. Live static PTP recording.
+9. Live slow loop, then rough large loop.
+10. Long-duration memory and map persistence test.
 
-Optional factors:
+## TF Ownership
 
-- Wheel planar motion factor.
-- GNSS factor if available later.
-- Manual anchor or survey control factor.
-
-### 6. Loop Closure
-
-Two-stage loop closure is required:
-
-1. Candidate search by descriptor, such as Scan Context family descriptors.
-2. Geometric verification by submap registration, such as GICP/NDT/Quatro-like
-   registration, with overlap/fitness/transform gates.
-
-Every rejected loop must be logged with the rejection reason. Silent loop
-failures make large maps impossible to debug.
-
-### 7. Map Store And Localization
-
-Map store format should include:
-
-- Submap point cloud file.
-- Submap pose.
-- Descriptor.
-- Bounding box/tile index.
-- Pose graph nodes/edges.
-- Calibration and pipeline version metadata.
-
-Localization mode should load only nearby submaps and publish a controlled
-bridge to the existing GOLE Nav2 contract after integration review.
-
-## Existing GOLE Integration
-
-Existing consumers expect:
-
-- `/motor_driver_node/odom` from `motor_driver`.
-- `/imu/data` from the external IMU stack.
-- `/odom` and `map -> odom -> base_link` for Nav2/localization workflows.
-- `base_link` as robot base frame.
-
-Conflict to avoid:
-
-- `gole_localization/odom_estimation` publishes `/odom` and `odom -> base_link`.
-- AMCL/localization in `gole_apart` owns `map -> odom` during 2D navigation.
-- A 3D SLAM mapping run must not publish the same TF chain at the same time
-  unless the existing localization/AMCL stack is intentionally disabled.
-
-## Milestones
-
-1. Topic and bag contract. Implemented for raw and canonical timed streams.
-2. Static time/extrinsic validation. Packet-time validation is implemented;
-   measured dual-LiDAR/IMU offsets and extrinsics still require a sensor bag.
-3. Single-front Mid-360 LIO.
-4. Single-rear Mid-360 LIO.
-5. Dual measurement update against one state.
-6. Keyframe and submap manager.
-7. Pose graph with odometry edges only.
-8. Loop closure candidate generation.
-9. Geometric loop verification and robust graph optimization.
-10. Persistent submap store.
-11. Localization mode and Nav2 bridge.
-
-## Done Criteria For First Outdoor Prototype
-
-- Processes a 10+ minute dual-Mid-360 outdoor bag offline.
-- Runs frontend faster than bag time on the development PC.
-- Keeps bounded memory with submaps.
-- Produces trajectory, local submaps, global map, and pose graph artifacts.
-- Reports drift, z drift, roll/pitch, loop statistics, and runtime metrics.
-- Clearly rejects bad loops instead of accepting visually plausible but wrong
-  closures.
+The development stack publishes under `/slam_3d/...` and does not publish TF by
+default. The current learning core has only an optional direct
+`map -> base_link` prototype transform. A future mapping backend may own the
+production `map -> odom -> base_link` split only after existing localization
+and AMCL owners are disabled.

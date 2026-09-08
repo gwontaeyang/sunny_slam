@@ -102,6 +102,11 @@ public:
 
   const Config & config() const;
 
+  // Expose the same validation used by align() so callers can fail fast at
+  // node startup instead of discovering an invalid backend configuration on
+  // the first scan.
+  static bool isValidConfig(const Config & config);
+
   // Increment order is [rotation, translation]:
   // R_new = Exp(dtheta) * R, followed by t_new = t + dt.
   static Eigen::Isometry3d applyIncrement(

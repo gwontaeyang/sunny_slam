@@ -10,47 +10,225 @@ def _load_yaml(relative_path):
         return yaml.safe_load(handle)
 
 
-def test_large_scale_pipeline_preserves_raw_livox_contract():
+def _load_package_yaml(package_name, relative_path):
+    package_share = Path(get_package_share_directory(package_name))
+    with (package_share / relative_path).open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def test_large_scale_pipeline_matches_hesai_geometry_and_time_limits():
     config = _load_yaml("config/large_scale_outdoor_pipeline.yaml")
 
-    assert config["profile"] == "gole_dual_mid360_large_scale_outdoor_v0"
-    assert (
-        config["sensor_ingest"]["rule"]
-        == "preserve_livox_custom_time_and_identity_fields_into_canonical_timed_clouds"
-    )
-    assert config["sensor_ingest"]["timestamp_contract"]["input_offset_time"].startswith(
-        "uint32_nanoseconds"
-    )
-    assert config["sensor_ingest"]["dual_policy"]["front_rear_outputs"] == "separate"
-    assert "kitti_xyz32" in config["sensor_ingest"]["legacy_dataset_bypass"][
-        "allowed_for"
+    assert config["profile"] == "gole_hesai_jt128_xt32_large_scale_outdoor_v1"
+    observed = config["observed_geoje_contract"]
+    assert observed["front_jt128"]["points"] == 230400
+    assert observed["rear_jt128"]["rings"] == 128
+    assert observed["center_xt32"]["points"] == 128000
+    assert observed["timestamp"]["granularity"].startswith("packet_time")
+    assert observed["timestamp"]["common_lidar_imu_clock"] is False
+    assert observed["timestamp"]["constant_offset_sufficient"] is False
+
+    ingest = config["sensor_ingest"]
+    assert ingest["package"] == "slam_3d_lidar_ingest"
+    assert "geometric_lidar_merge" in ingest["explicitly_not_owned"]
+    assert ingest["geoje_legacy_time"]["policy"] == "calibrated_sensor_time"
+    assert ingest["geoje_legacy_time"]["quality"].endswith("salvage_only")
+
+    frontend = config["multi_lidar_frontend"]
+    assert frontend["trigger_sensor"] == "center_xt32"
+    assert frontend["synchronization"]["consume_once"] is True
+    assert frontend["synchronization"]["structure"] == "bounded_per_sensor_queue"
+    assert frontend["synchronization"]["decision_watermarks"] == [
+        "latest_auxiliary_sensor_stamp"
     ]
-    assert "PointXYZ_only_conversion" in config["sensor_ingest"]["forbidden_before_lio"]
-    measurement_sets = config["frontend_lio"]["update_model"]["measurement_sets"]
-    assert measurement_sets["front_mid360"]["covariance_scale"] == 1.0
-    assert measurement_sets["rear_mid360"]["covariance_scale"] == 1.0
-    assert config["submap_manager"]["storage"]["descriptors"] == "scan_context_or_ring_key"
-    assert "accepted_loops" in config["runtime_health_metrics"]["required"]
-
-
-def test_topic_contract_keeps_navigation_bridge_explicit():
-    contract = _load_yaml("config/dual_mid360_topic_contract.yaml")
-
-    assert contract["existing_inputs"]["wheel_odom"]["topic"] == "/motor_driver_node/odom"
-    assert contract["existing_inputs"]["external_imu"]["topic"] == "/imu/data"
-    assert contract["mid360_raw_inputs"]["front_custom"]["preferred_type"].endswith(
-        "CustomMsg"
-    )
-    timed = contract["mid360_raw_inputs"]["front_points_timed"]
-    assert timed["required_fields"]["offset_time"].startswith("UINT32_nanoseconds")
-    assert timed["header_stamp"].startswith("livox_custom_timebase_plus")
-    assert contract["ingest_health"]["topic"] == "/slam_3d/ingest/health"
     assert (
-        contract["ingest_health"]["commissioning_metadata"]["imu_clock_domain"]
-        == "unverified_until_measured"
+        frontend["synchronization"][
+            "cross_topic_primary_progress_is_dropout_proof"
+        ]
+        is False
     )
-    assert contract["internal_topics"]["frontend_odom"]["topic"] == "/slam_3d/frontend/odom"
-    assert contract["internal_topics"]["backend_odom"]["topic"] == "/slam_3d/backend/odom"
-    assert "exactly_one_localization_or_slam_stack" in contract["downstream_bridge_topics"][
-        "nav2_tf"
-    ]["rule"]
+    assert "lookup_sensor_to_base_tf_or_reject_sensor_cloud" in frontend[
+        "preprocessing_order"
+    ]
+    assert "packet_time_not_channel_firing_time" in frontend["current_limits"]
+    assert "publish_corrected_channel_firing_time_from_hesai_sdk" in config[
+        "production_frontend_target"
+    ]["required_before_claiming_tightly_coupled_lio"]
+
+
+def test_indoor_pipeline_reuses_core_and_excludes_wheel_from_estimator():
+    config = _load_yaml("config/indoor_pipeline.yaml")
+
+    assert config["profile"] == "gole_hesai_indoor_lidar_imu_no_wheel_v1"
+    assert config["purpose"]["sensors"]["imu"] == "/imu/data"
+    assert config["purpose"]["excluded_estimator_inputs"] == ["wheel_odometry"]
+    assert config["inputs"]["wheel_odom"] == "disabled"
+    assert config["architecture"]["shared_core"]["package"] == "slam_3d_core"
+    assert config["architecture"]["shared_core"]["environment_independent"] is True
+    assert config["architecture"]["outdoor_profile_layer"]["status"] == "hold"
+
+    workflow = config["development_workflow"]
+    assert workflow["shared_core_source_of_truth"] == "slam_3d_core"
+    assert workflow["shared_core_edit_policy"] == "single_owner_per_worktree"
+    assert workflow["parallel_change_isolation"] == "separate_git_worktree_and_branch"
+    assert "shared_core_build_and_tests" in workflow["core_integration_gate"]
+    assert "indoor_profile_regression" in workflow["core_integration_gate"]
+    assert "duplicated_indoor_and_outdoor_core_source_trees" in workflow["prohibited"]
+    assert (
+        "concurrent_uncoordinated_edits_to_shared_core_in_one_worktree"
+        in workflow["prohibited"]
+    )
+
+    profiles = config["sensor_profiles"]
+    assert set(profiles) == {"indoor_xt32_single", "indoor_dual_jt128"}
+    assert profiles["indoor_xt32_single"]["wheel_prediction"] is False
+    assert profiles["indoor_dual_jt128"]["wheel_prediction"] is False
+    assert (
+        profiles["indoor_dual_jt128"]["inter_lidar_motion_compensation"]
+        == "imu_rotation_only"
+    )
+
+    assert config["mapping"]["spatial_mode"] == "se3"
+    assert config["frontend"]["shock_policy"][
+        "quarantine_persistent_map_mutation"
+    ] is True
+    terrain = config["mapping"]["terrain_evidence"]
+    assert terrain["no_return_policy"] == "unknown_not_drop"
+    assert terrain["minimum_independent_viewpoint_confirmations"] == 2
+    assert terrain["downstream_projection_status"] == (
+        "experimental_offline_continuous_support_cost"
+    )
+    assert config["outputs"]["terrain_evidence"] == "/slam_3d/terrain/evidence"
+    assert config["outputs"]["terrain_evidence_colored"] == (
+        "/slam_3d/terrain/evidence_colored"
+    )
+    assert config["outputs"]["terrain_support_evidence"] == (
+        "/slam_3d/terrain/support_evidence"
+    )
+    support = terrain["support_surface"]
+    assert support["probable_support_requires_direct_confirmed_anchor"] is True
+    assert support["probable_support_recursive_propagation"] == "prohibited"
+    assert support["any_hazard_vote_vetoes_support"] is True
+    assert support["projection"] == "continuous_cost_separate_from_trinary_occupancy"
+    assert terrain["ramp_geometry_gate"]["stage_2"] == (
+        "robust_local_3d_plane_support"
+    )
+    assert terrain["semantic_rgb"]["floor"] == [105, 190, 105]
+    assert terrain["semantic_rgb"]["ramp"] == [45, 165, 255]
+    assert terrain["semantic_rgb"]["observed_drop"] == [235, 55, 55]
+    assert config["outputs"]["terrain_preview_evidence"] == (
+        "/slam_3d/terrain/preview_evidence"
+    )
+    preview = config["mapping"]["terrain_preview_memory"]
+    assert preview["status"] == "observer_only"
+    assert preview["minimum_ahead_distance_m"] == 0.75
+    assert preview["maximum_lateral_distance_m"] == 1.00
+    assert preview["pose_graph_edge_mutation"] == "prohibited_in_observer_stage"
+    assert preview["unsafe_crossing_policy"] == "conflict_not_confirmation"
+    assert config["mapping"]["submaps"]["overlap_required"] is True
+    assert config["mapping"]["pose_graph"]["dimensions"] == "se3"
+    assert config["frontend"]["deskew"]["required_frame"] == "cv7_link"
+    assert config["frontend"]["deskew"]["imu_to_base_rpy_deg"] == [
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert config["frontend"]["deskew"]["axis_convention"] == (
+        "native_xyz_with_identity_base_link_to_cv7_link_rotation"
+    )
+    assert config["frontend"]["deskew"]["legacy_roll180_policy"] == (
+        "archived_dataset_specific_replay_only"
+    )
+    assert "xsens_link" in config["frontend"]["deskew"]["not_transferable_to"]
+    assert config["validation"]["current_dataset"] == "04_gangnam"
+    assert config["validation"]["explicitly_not_replayed"] == ["wheel_odometry"]
+    assert "no_wheel_subscription" in config["validation"]["quality_gates"]
+    assert "dynamic_object_detection" in config["purpose"]["excluded_processing"]
+
+
+def test_topic_contract_preserves_actual_point_layout_and_three_sensor_identity():
+    contract = _load_yaml("config/hesai_jt128_xt32_topic_contract.yaml")
+
+    assert contract["dataset_evidence"]["source"] == "02_samsung_geoje"
+    assert contract["dataset_evidence"]["input_point_step_bytes"] == 26
+    assert contract["dataset_evidence"]["input_fields"]["timestamp"] == {
+        "offset": 18,
+        "type": "FLOAT64",
+    }
+    assert (
+        contract["dataset_evidence"]["timestamp_quality"]["semantic"]
+        == "packet_time_not_channel_firing_time"
+    )
+    assert contract["hesai_raw_inputs"]["front_jt128"]["ring_range"] == [0, 127]
+    assert contract["hesai_raw_inputs"]["center_xt32"]["ring_range"] == [0, 31]
+    canonical = contract["canonical_outputs"]
+    assert canonical["point_step_bytes"] == 24
+    assert canonical["fields"]["offset_time"]["type"] == "UINT32"
+    assert canonical["front"]["sensor_id"] == 0
+    assert canonical["rear"]["sensor_id"] == 1
+    assert canonical["center"]["sensor_id"] == 2
+    assert contract["core_multi_lidar_sync"]["policy"]["consume_each_auxiliary_scan_at_most_once"]
+    missing_decision = contract["core_multi_lidar_sync"]["policy"][
+        "auxiliary_missing_decision"
+    ]
+    assert missing_decision == [
+        "per_auxiliary_timestamp_watermark",
+        "bounded_wall_timeout_on_stream_stall",
+    ]
+    assert (
+        contract["core_multi_lidar_sync"]["policy"][
+            "cross_topic_primary_progress_is_dropout_proof"
+        ]
+        is False
+    )
+    assert (
+        contract["core_multi_lidar_sync"]["policy"][
+            "motion_compensation_failure_policy"
+        ]
+        == "drop_auxiliary"
+    )
+    assert contract["clock_policies"]["production"]["note"].endswith(
+        "not_proof_of_ptp_lock"
+    )
+    assert (
+        contract["clock_policies"]["geoje_legacy_replay"]["policy"]
+        == "calibrated_sensor_time"
+    )
+
+
+def test_hesai_driver_template_uses_one_host_udp_port_per_lidar():
+    config = _load_yaml("config/hesai_jt128_xt32_driver.template.yaml")
+    ports = [
+        entry["driver"]["lidar_udp_type"]["udp_port"]
+        for entry in config["lidar"]
+    ]
+
+    assert ports == [2368, 2369, 2370]
+    assert len(set(ports)) == 3
+
+
+def test_geoje_replay_uses_fixed_affine_sensor_clock_calibration():
+    config = _load_package_yaml(
+        "slam_3d_lidar_ingest",
+        "config/geoje_legacy_bag_ingest_params.yaml",
+    )["hesai_pointcloud_ingest"]["ros__parameters"]
+
+    for sensor in ("front", "rear", "center"):
+        prefix = f"{sensor}."
+        assert config[prefix + "clock_policy"] == "calibrated_sensor_time"
+        assert config[prefix + "clock_domain"] == "rosbag_record_time_affine_fit"
+        assert 0.99 < config[prefix + "time_scale"] < 1.01
+        assert config[prefix + "anchor_input_header_ns"] > 0
+        assert config[prefix + "anchor_output_start_ns"] > 0
+        assert (
+            config[prefix + "calibration_valid_min_input_header_ns"]
+            <= config[prefix + "anchor_input_header_ns"]
+            <= config[prefix + "calibration_valid_max_input_header_ns"]
+        )
+        assert 0.0 < config[prefix + "max_output_stamp_step_s"] <= 2.0
+        assert config[prefix + "calibration_fit_rmse_ms"] >= 0.0
+        assert (
+            config[prefix + "calibration_fit_max_abs_ms"]
+            >= config[prefix + "calibration_fit_rmse_ms"]
+        )
+        assert config[prefix + "calibration_id"].endswith("record_time_fit_v1")

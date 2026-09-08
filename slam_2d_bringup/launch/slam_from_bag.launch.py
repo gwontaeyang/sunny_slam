@@ -1,203 +1,118 @@
 #!/usr/bin/env python3
+"""Replay LaserScan, IMU and odometry into the project-owned 2D SLAM node."""
 
-import os
+import math
+from pathlib import Path
 
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument,
-    EmitEvent,
-    ExecuteProcess,
-    LogInfo,
-    RegisterEventHandler,
-    TimerAction,
+    DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction,
+    SetLaunchConfiguration,
 )
 from launch.conditions import IfCondition
-from launch.events import matches_action
-from launch.substitutions import (
-    AndSubstitution,
-    LaunchConfiguration,
-    NotSubstitution,
-    PythonExpression,
-)
-from launch_ros.actions import LifecycleNode, Node
-from launch_ros.event_handlers import OnStateTransition
-from launch_ros.events.lifecycle import ChangeState
-from lifecycle_msgs.msg import Transition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def value(context, name, default=""):
+    return LaunchConfiguration(name, default=default).perform(context).strip()
+
+
+def boolean(context, name, default="false"):
+    raw = value(context, name, default).lower()
+    if raw not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+        raise RuntimeError(f"{name} must be a boolean")
+    return raw in {"true", "1", "yes", "on"}
+
+
+def validate_replay(context):
+    start_slam = boolean(context, "start_slam")
+    static_tf = boolean(context, "use_static_map_odom")
+    if start_slam and static_tf:
+        raise RuntimeError("SLAM and a static map->odom publisher cannot run together")
+    if boolean(context, "start_pointcloud_projection"):
+        raise RuntimeError("Replay expects LaserScan input; run pointcloud preprocessing separately")
+    bag = value(context, "bag_file")
+    if bag and not Path(bag).expanduser().exists():
+        raise RuntimeError(f"Bag path does not exist: {bag}")
+    if bag and not boolean(context, "use_sim_time"):
+        raise RuntimeError("Bag replay requires use_sim_time:=true")
+    for name, allow_zero in (("bag_play_rate", False), ("bag_start_offset_s", True),
+                             ("slam_ready_timeout_s", False)):
+        try:
+            number = float(value(context, name))
+        except ValueError as exc:
+            raise RuntimeError(f"{name} must be numeric") from exc
+        if not math.isfinite(number) or number < 0 or (number == 0 and not allow_zero):
+            raise RuntimeError(f"{name} must be finite and {'non-negative' if allow_zero else 'positive'}")
+    actions = []
+    if value(context, "slam_scan_topic"):
+        actions.append(SetLaunchConfiguration("scan_topic", value(context, "slam_scan_topic")))
+    if static_tf:
+        actions.append(Node(
+            package="tf2_ros", executable="static_transform_publisher",
+            name="static_map_odom_tf", output="screen",
+            arguments=["--x", "0", "--y", "0", "--z", "0",
+                       "--frame-id", "map", "--child-frame-id", "odom"],
+        ))
+    return actions
+
+
+def playback_actions(context):
+    bag = value(context, "bag_file")
+    if not bag:
+        return []
+    scan_topic = value(context, "scan_topic", "/scan_laserscan")
+    imu_topic = value(context, "roughness_innovation_imu_topic")
+    if not imu_topic:
+        params = value(context, "roughness_innovation_params_file")
+        profile = yaml.safe_load(Path(params).expanduser().read_text()) if params else {}
+        imu_topic = (profile or {}).get("slam_toolbox", {}).get("ros__parameters", {}).get(
+            "roughness_imu_topic", "/imu/data")
+    if boolean(context, "start_slam"):
+        share = Path(get_package_share_directory("slam_2d_bringup"))
+        command = ["python3", str(share / "scripts/play_after_slam_ready.py"),
+                   "--bag", str(Path(bag).expanduser()),
+                   "--rate", value(context, "bag_play_rate"),
+                   "--start-offset", value(context, "bag_start_offset_s"),
+                   "--scan-topic", scan_topic,
+                   "--timeout", value(context, "slam_ready_timeout_s")]
+    else:
+        command = ["ros2", "bag", "play", str(Path(bag).expanduser()), "--clock",
+                   "--rate", value(context, "bag_play_rate"),
+                   "--start-offset", value(context, "bag_start_offset_s"),
+                   "--disable-keyboard-controls"]
+    if boolean(context, "play_slam_topics_only"):
+        topics = [scan_topic, str(imu_topic), "/tf", "/tf_static", "/odom",
+                  "/motor_driver_node/odom", "/imu/data_raw"]
+        command += ["--topics", *dict.fromkeys(topics)]
+    return [ExecuteProcess(cmd=command, output="screen")]
 
 
 def generate_launch_description():
-    slam_2d_bringup_dir = get_package_share_directory("slam_2d_bringup")
-    default_params_file = os.path.join(
-        slam_2d_bringup_dir,
-        "config",
-        "mapper_params.yaml",
-    )
-
-    bag_file = LaunchConfiguration("bag_file")
-    use_sim_time = LaunchConfiguration("use_sim_time")
-    start_slam = LaunchConfiguration("start_slam")
-    scan_topic = LaunchConfiguration("scan_topic")
-    base_frame = LaunchConfiguration("base_frame")
-    use_static_map_odom = LaunchConfiguration("use_static_map_odom")
-    bag_play_rate = LaunchConfiguration("bag_play_rate")
-    params_file = LaunchConfiguration("params_file")
-
-    declare_bag_file = DeclareLaunchArgument(
-        "bag_file",
-        default_value="",
-        description="Path to the bag file to play. Leave empty to skip playback.",
-    )
-    declare_use_sim_time = DeclareLaunchArgument(
-        "use_sim_time",
-        default_value="true",
-        description="Use simulation clock from bag playback.",
-    )
-    declare_start_slam = DeclareLaunchArgument(
-        "start_slam",
-        default_value="true",
-        description="Start slam_toolbox before playing the bag.",
-    )
-    declare_scan_topic = DeclareLaunchArgument(
-        "scan_topic",
-        default_value="/scan_laserscan",
-        description="LaserScan topic used by slam_toolbox.",
-    )
-    declare_base_frame = DeclareLaunchArgument(
-        "base_frame",
-        default_value="base_link",
-        description="Robot base frame used by slam_toolbox.",
-    )
-    declare_use_static_map_odom = DeclareLaunchArgument(
-        "use_static_map_odom",
-        default_value="false",
-        description="Publish a static map->odom transform for offline debugging.",
-    )
-    declare_bag_play_rate = DeclareLaunchArgument(
-        "bag_play_rate",
-        default_value="1.0",
-        description="Bag playback rate.",
-    )
-    declare_params_file = DeclareLaunchArgument(
-        "params_file",
-        default_value=default_params_file,
-        description="Path to slam_toolbox params YAML file.",
-    )
-
-    slam_toolbox_node = LifecycleNode(
-        package="slam_toolbox",
-        executable="sync_slam_toolbox_node",
-        name="slam_toolbox",
-        output="screen",
-        namespace="",
-        parameters=[
-            params_file,
-            {
-                "use_sim_time": use_sim_time,
-                "scan_topic": scan_topic,
-                "base_frame": base_frame,
-            },
-        ],
-        condition=IfCondition(start_slam),
-    )
-
-    configure_event = EmitEvent(
-        event=ChangeState(
-            lifecycle_node_matcher=matches_action(slam_toolbox_node),
-            transition_id=Transition.TRANSITION_CONFIGURE,
+    share = Path(get_package_share_directory("slam_2d_bringup"))
+    return LaunchDescription([
+        DeclareLaunchArgument("bag_file", default_value="",
+                              description="Bag path; empty starts SLAM without playback."),
+        DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument("start_slam", default_value="true"),
+        DeclareLaunchArgument("scan_topic", default_value="/scan_laserscan"),
+        DeclareLaunchArgument("slam_scan_topic", default_value="",
+                              description="Legacy scan-topic override; empty uses scan_topic."),
+        DeclareLaunchArgument("bag_play_rate", default_value="1.0"),
+        DeclareLaunchArgument("bag_start_offset_s", default_value="0.0"),
+        DeclareLaunchArgument("slam_ready_timeout_s", default_value="30.0"),
+        DeclareLaunchArgument("play_slam_topics_only", default_value="true"),
+        DeclareLaunchArgument("use_static_map_odom", default_value="false"),
+        DeclareLaunchArgument("start_pointcloud_projection", default_value="false",
+                              description="Legacy option; preprocessing must be launched separately."),
+        OpaqueFunction(function=validate_replay),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(share / "launch/slam.launch.py")),
+            condition=IfCondition(LaunchConfiguration("start_slam")),
         ),
-        condition=IfCondition(start_slam),
-    )
-
-    activate_event = RegisterEventHandler(
-        OnStateTransition(
-            target_lifecycle_node=slam_toolbox_node,
-            start_state="configuring",
-            goal_state="inactive",
-            entities=[
-                LogInfo(msg="[slam_2d_bringup] Activating slam_toolbox."),
-                EmitEvent(
-                    event=ChangeState(
-                        lifecycle_node_matcher=matches_action(slam_toolbox_node),
-                        transition_id=Transition.TRANSITION_ACTIVATE,
-                    )
-                ),
-            ],
-        ),
-        condition=IfCondition(start_slam),
-    )
-
-    bag_play_after_slam = RegisterEventHandler(
-        OnStateTransition(
-            target_lifecycle_node=slam_toolbox_node,
-            start_state="activating",
-            goal_state="active",
-            entities=[
-                LogInfo(
-                    msg="[slam_2d_bringup] SLAM is active. Starting bag playback."),
-                TimerAction(
-                    period=3.0,
-                    actions=[
-                        ExecuteProcess(
-                            cmd=[
-                                "ros2",
-                                "bag",
-                                "play",
-                                bag_file,
-                                "--clock",
-                                "--rate",
-                                bag_play_rate,
-                            ],
-                            output="screen",
-                        )
-                    ],
-                ),
-            ],
-        ),
-        condition=IfCondition(
-            AndSubstitution(
-                start_slam,
-                PythonExpression(['"', bag_file, '" != ""']),
-            )
-        ),
-    )
-
-    bag_play_only = ExecuteProcess(
-        cmd=["ros2", "bag", "play", bag_file, "--clock", "--rate", bag_play_rate],
-        output="screen",
-        condition=IfCondition(
-            AndSubstitution(
-                PythonExpression(['"', bag_file, '" != ""']),
-                NotSubstitution(start_slam),
-            )
-        ),
-    )
-
-    static_map_odom_tf = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="static_map_odom_tf",
-        arguments=["0", "0", "0", "0", "0", "0", "map", "odom"],
-        output="screen",
-        condition=IfCondition(use_static_map_odom),
-    )
-
-    return LaunchDescription(
-        [
-            declare_bag_file,
-            declare_use_sim_time,
-            declare_start_slam,
-            declare_scan_topic,
-            declare_base_frame,
-            declare_use_static_map_odom,
-            declare_bag_play_rate,
-            declare_params_file,
-            slam_toolbox_node,
-            static_map_odom_tf,
-            configure_event,
-            activate_event,
-            bag_play_after_slam,
-            bag_play_only,
-            LogInfo(msg=["SLAM scan topic: ", scan_topic]),
-        ]
-    )
+        OpaqueFunction(function=playback_actions),
+    ])

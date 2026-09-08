@@ -1,258 +1,264 @@
-profile: gole_dual_mid360_large_scale_outdoor_v0
+profile: gole_hesai_jt128_xt32_large_scale_outdoor_v1
 
 purpose:
-  environment: large_scale_outdoor
+  environment: very_large_outdoor_construction_site
+  disturbance:
+    - intermittent_threshold_crossing_shock
+    - roll_pitch_impulse
+    - wheel_slip
+    - repeated_structure
   sensors:
-    lidar: dual_livox_mid360
-    wheel_odom: existing_motor_driver_odom
-    imu: existing_external_imu
-  goal: build_internal_lidar_inertial_slam_pipeline
+    lidar:
+      front: hesai_jt128
+      rear: hesai_jt128
+      center: hesai_xt32
+    wheel_odom: /motor_driver_node/odom
+    imu: /imu/data
+  goal: editable_internal_lidar_inertial_3d_slam
 
 frames:
-  global_frame: map
-  continuous_frame: odom
-  base_frame: base_link
-  front_lidar_frame: mid360_front_link
-  rear_lidar_frame: mid360_rear_link
-  imu_frame: imu_link
+  global: map
+  continuous: odom
+  base: base_link
+  lidar:
+    front: hesai_front
+    rear: hesai_rear
+    center: hesai_center
+  imu_observed: cv7_link
 
-raw_inputs:
-  front_livox_custom: /slam_3d/input/mid360_front/livox
-  rear_livox_custom: /slam_3d/input/mid360_rear/livox
-  front_points_timed: /slam_3d/input/mid360_front/points_timed
-  rear_points_timed: /slam_3d/input/mid360_rear/points_timed
-  front_points_debug: /slam_3d/input/mid360_front/points_debug
-  rear_points_debug: /slam_3d/input/mid360_rear/points_debug
+inputs:
+  raw_clouds:
+    front: /hesai/front/lidar_points
+    rear: /hesai/rear/lidar_points
+    center: /hesai/center/lidar_points
+  canonical_clouds:
+    front: /slam_3d/input/hesai_front/points_timed
+    rear: /slam_3d/input/hesai_rear/points_timed
+    center: /slam_3d/input/hesai_center/points_timed
   wheel_odom: /motor_driver_node/odom
   imu: /imu/data
   tf: /tf
   tf_static: /tf_static
 
-output_contract:
+outputs:
   reference_wheel_imu_odom: /slam_3d/reference/wheel_imu_odom
   frontend_odom: /slam_3d/frontend/odom
   frontend_path: /slam_3d/frontend/path
-  frontend_keyframes: /slam_3d/frontend/keyframes
-  frontend_local_map: /slam_3d/frontend/local_map
-  backend_odom: /slam_3d/backend/odom
-  backend_path: /slam_3d/backend/path
-  backend_pose_graph: /slam_3d/backend/pose_graph
-  backend_loop_markers: /slam_3d/backend/loop_markers
-  active_submap_cloud: /slam_3d/map/active_submap
-  local_submap_cloud: /slam_3d/map/local_submaps
-  global_map_cloud: /slam_3d/map/global_cloud
-  health: /slam_3d/health
+  active_submap: /slam_3d/map/active_submap
+  global_map: /slam_3d/map/global_cloud
+  ingest_health: /slam_3d/ingest/health
+  slam_health: /slam_3d/health
 
-tf_ownership:
-  architecture_only: publish_no_slam_tf
-  mapping_mode:
-    owner: slam_3d_backend
-    publishes:
-      - map_to_odom
-      - odom_to_base_link
-    requires_disabled:
-      - gole_localization/odom_estimation/odom_estimation_node_tf
-      - nav2_amcl_tf
-  navigation_compatibility:
-    odom_topic_for_nav2: /odom
-    rule: bridge_backend_odom_to_nav_only_after_2d_nav_integration_review
-
-calibration_and_time:
-  required_extrinsics:
-    - base_link_to_mid360_front_link
-    - base_link_to_mid360_rear_link
-    - base_link_to_imu_link
-    - mid360_front_link_to_mid360_rear_link
-  required_time_offsets:
-    - front_lidar_to_imu
-    - rear_lidar_to_imu
-    - wheel_odom_to_imu
-  synchronization_policy:
-    preferred: hardware_time_sync
-    mid360_capability_to_verify:
-      - ptp_or_gps_time
-      - per_point_timestamp
-      - packet_drop_counter
-    rejection_thresholds:
-      lidar_header_skew_ms: 5.0
-      imu_gap_ms: 20.0
-      wheel_odom_gap_ms: 100.0
+observed_geoje_contract:
+  source: 02_samsung_geoje
+  lidar_layout:
+    point_step_bytes: 26
+    fields: [x_float32, y_float32, z_float32, intensity_float32, ring_uint16, timestamp_float64]
+  front_jt128: {points: 230400, rings: 128, scan_duration_s: 0.100}
+  rear_jt128: {points: 230400, rings: 128, scan_duration_s: 0.100}
+  center_xt32: {points: 128000, rings: 32, scan_duration_s: 0.100}
+  timestamp:
+    granularity: packet_time_repeated_for_256_points
+    exact_firing_time: unavailable
+    common_lidar_imu_clock: false
+    constant_offset_sufficient: false
+  recoverable:
+    - xyz_intensity_ring
+    - packet_order_and_packet_relative_time
+    - sensor_local_monotonic_timeline
+    - recorded_static_extrinsics
+  not_recoverable:
+    - exact_lidar_to_imu_time_offset
+    - channel_firing_time
+    - ptp_lock_history
+    - driver_and_network_latency
+    - return_mode_and_firetime_table
 
 sensor_ingest:
-  implementation: slam_3d_livox_ingest/mid360_ingest_node
-  rule: preserve_livox_custom_time_and_identity_fields_into_canonical_timed_clouds
-  timestamp_contract:
-    input_timebase: uint64_nanoseconds_first_point
-    input_offset_time: uint32_nanoseconds_relative_to_timebase
-    output_header_stamp: input_timebase_plus_per_sensor_measured_offset
-    output_offset_time: unchanged_uint32_nanoseconds
-    clock_domain_default: unverified
-    rule: numeric_timestamp_similarity_does_not_prove_lidar_imu_synchronization
-  packet_rejection:
-    - invalid_or_non_increasing_timebase
-    - declared_actual_point_count_mismatch
-    - nonfinite_point_ratio_below_threshold
-    - offset_time_regression
-    - zero_or_excessive_scan_duration
-  dual_policy:
-    front_rear_outputs: separate
-    peer_skew: diagnostics_only
-    pre_deskew_concatenation: forbidden
-  legacy_dataset_bypass:
-    allowed_for:
-      - kitti_xyz32
-      - gs_planar_xyz32
-      - hilti_native_pointcloud2_replay
-    rule: direct_pointcloud2_to_learning_core_without_claiming_raw_mid360_validation
-  forbidden_before_lio:
-    - PointXYZ_only_conversion
-    - lidar_preprocessing_node
-    - 2d_laserscan_projection
-    - naive_front_rear_pointcloud_concatenation
-  debug_outputs_may_use_pointxyz: true
+  package: slam_3d_lidar_ingest
+  executable: hesai_pointcloud_ingest_node
+  responsibilities:
+    - validate_pointcloud2_layout_and_bounds
+    - validate_frame_model_ring_and_point_count_profile
+    - expose_packet_timestamp_granularity
+    - normalize_to_header_plus_uint32_offset_time
+    - reject_nonfinite_and_nonmonotonic_inputs
+  explicitly_not_owned:
+    - extrinsic_transform
+    - geometric_lidar_merge
+    - scan_matching
+    - imu_integration
+  production_time:
+    policy: sensor_header
+    required_clock: measured_common_ptp_domain
+    ptp_status_validation: required_driver_extension
+  geoje_legacy_time:
+    policy: calibrated_sensor_time
+    calibration: fixed_anchor_plus_affine_sensor_clock_fit
+    target: bag_record_time_minus_observed_scan_duration
+    quality: deterministic_bag_record_time_salvage_only
+    requires: [use_sim_time, rosbag_clock]
 
-learning_prototype:
+multi_lidar_frontend:
   package: slam_3d_core
   executable: scan_to_map_icp_node
-  launch_argument: run_learning_slam_core
-  default_enabled: false
-  role: editable_first_stage_scan_to_map_frontend
-  consumes_timed_pointcloud2:
-    - /slam_3d/input/mid360_front/points_timed
-    - /slam_3d/input/mid360_rear/points_timed
-  consumes_existing_priors:
-    wheel_odom: /motor_driver_node/odom
-    imu: /imu/data
-  publishes:
-    odom: /slam_3d/frontend/odom
-    path: /slam_3d/frontend/path
-    active_submap: /slam_3d/map/active_submap
-    global_cloud: /slam_3d/map/global_cloud
-    health: /slam_3d/health
-  tf_default: disabled
-  deliberate_gaps_before_production:
-    - no_imu_preintegration
-    - gyro_only_deskew_without_translation_or_bias_state
-    - latest_secondary_snapshot_instead_of_paired_dual_measurement_queue
-    - no_production_factor_graph_or_persistent_submaps
-    - no_submap_persistence
+  trigger_sensor: center_xt32
+  auxiliary_sensors: [front_jt128, rear_jt128]
+  synchronization:
+    structure: bounded_per_sensor_queue
+    consume_once: true
+    queue_order: sensor_timestamp_sorted
+    production_stamp_tolerance_s: 0.01
+    reorder_window_s: 0.02
+    decision_watermarks:
+      - latest_auxiliary_sensor_stamp
+    cross_topic_primary_progress_is_dropout_proof: false
+    wall_dropout_timeout_s: 0.50
+    wall_timeout_role: auxiliary_stream_stall_or_end_of_input
+    queue_sizing_rule: capacity_at_least_primary_rate_hz_times_wall_timeout_s
+    timeout_policy: process_available_clouds_with_degraded_diagnostics
+    inter_lidar_wheel_lookup: exact_or_interpolated_bracket_only
+    inter_lidar_failure_policy: drop_auxiliary
+  preprocessing_order:
+    - validate_canonical_point_time
+    - lookup_sensor_to_base_tf_or_reject_sensor_cloud
+    - transform_sensor_points_to_base_frame
+    - packet_level_imu_rotation_deskew_per_sensor
+    - wheel_interpolate_auxiliary_clouds_to_primary_stamp
+    - concatenate_available_base_frame_clouds
+    - crop_robot_body_and_range
+    - adaptive_voxel_downsample
+  registration:
+    baseline: gicp_scan_to_local_map
+    geoje_bounded_replay: voxel_surfel_scan_to_local_map
+    robust_refinement: trimmed_correspondence_optional
+    prediction:
+      - wheel_odom_delta
+      - imu_rotation
+      - constant_velocity_fallback
+    shock_policy:
+      - detect_imu_roughness
+      - quarantine_implausible_pose_correction
+      - avoid_keyframe_insertion_during_shock
+    place_recognition:
+      descriptor: scan_context_family
+      geometric_verification: gicp_against_candidate_submap
+      robust_pose_graph_kernel: cauchy
+  current_limits:
+    - packet_time_not_channel_firing_time
+    - gyro_only_deskew_without_translation_or_imu_bias_state
+    - inter_lidar_motion_compensation_depends_on_wheel_odom_quality
+    - no_iterated_error_state_kalman_filter
+    - pointxyz_internal_type_discards_sensor_identity_after_merge
+    - no_persistent_submap_store
+    - no_production_incremental_factor_graph
 
-frontend_lio:
-  design_reference: fast_lio2_style_iterated_ekf
+production_frontend_target:
+  design: iterated_error_state_lio
   state:
     - position
     - velocity
     - orientation
-    - imu_bias_accel
-    - imu_bias_gyro
+    - accelerometer_bias
+    - gyroscope_bias
     - gravity
-    - optional_lidar_time_offsets
-  update_model:
-    type: direct_point_to_local_map
-    map_structure: incremental_voxel_or_kdtree_local_map
-    measurement_sets:
-      front_mid360:
-        extrinsic_state: fixed_then_optionally_refined
-        covariance_scale: 1.0
-      rear_mid360:
-        extrinsic_state: fixed_then_optionally_refined
-        covariance_scale: 1.0
-      wheel_odom:
-        use_as: planar_velocity_prior
-        reject_when_slip_detected: true
-  keyframe_policy:
-    translation_m: 0.8
-    rotation_deg: 8.0
-    time_s: 2.0
-  degeneracy_detection:
-    method: hessian_or_observability_eigenvalues
-    action:
-      - weaken_degenerate_lidar_directions
-      - increase_output_covariance
-      - rely_more_on_imu_and_wheel_prior
+    - optional_per_lidar_time_offset_and_extrinsic
+  measurement_model:
+    type: direct_point_to_plane_or_surfel_local_map
+    per_sensor_residual_statistics: true
+    degeneracy:
+      metric: normal_equation_eigenvalues
+      response:
+        - downweight_unobservable_directions
+        - increase_covariance
+        - retain_imu_and_wheel_constraints
+  required_before_claiming_tightly_coupled_lio:
+    - publish_corrected_channel_firing_time_from_hesai_sdk
+    - verify_ptp_lock_offset_rate_and_reset
+    - calibrate_imu_intrinsics_and_lidar_imu_extrinsics
+    - estimate_or_measure_lidar_imu_time_offset
+    - add_imu_preintegration_or_error_state_propagation
+    - add_translation_deskew
 
-submap_manager:
-  submap_creation:
-    keyframes_per_submap: 60
-    max_submap_length_m: 45.0
+submaps:
+  creation:
+    max_keyframes: 60
+    max_length_m: 45.0
     overlap_keyframes: 10
-  storage:
-    cloud_format: pcd_or_laz_per_submap
-    graph_format: yaml_or_sqlite_metadata_plus_g2o
-    descriptors: scan_context_or_ring_key
-    index: tile_or_submap_bounding_boxes
-  publish_policy:
-    active_submap_hz: 2.0
-    global_map_hz: 0.1
-    global_map_downsample_m: 0.25
+  persistence:
+    cloud: pcd_or_laz
+    metadata: yaml_or_sqlite
+    pose_graph: g2o_or_structured_binary
+  publishing:
+    active_hz: 2.0
+    global_hz: 0.1
+    global_voxel_m: 0.25
 
-backend_pose_graph:
-  design_reference: lio_sam_or_glim_style_factor_graph
+backend:
   factors:
-    - frontend_lio_between_factor
-    - loop_closure_factor
-    - wheel_planar_motion_factor
-    - optional_gnss_factor
-    - optional_manual_anchor_factor
-  robust_estimation:
-    robust_kernel: huber_or_cauchy
-    switchable_constraints: true
-  optimization:
-    incremental_window: fixed_lag_for_recent_keyframes
-    global_optimization_trigger:
-      - accepted_loop_closure
-      - submap_finished
-      - manual_save_request
+    - frontend_between
+    - verified_loop
+    - wheel_planar_velocity
+    - optional_gnss
+    - optional_manual_anchor
+  loop_robustness:
+    descriptor_candidate_generation: true
+    geometric_verification: true
+    robust_kernel: cauchy
+    reject_large_residual_or_low_overlap: true
+  optimization_triggers:
+    - accepted_loop
+    - completed_submap
+    - explicit_map_save
 
-loop_closure:
-  candidate_generation:
-    descriptor: scan_context_family
-    min_travel_distance_m: 20.0
-    exclude_recent_keyframes: 80
-  geometric_verification:
-    method: gicp_or_ndt_on_submaps
-    min_overlap_ratio: 0.35
-    max_fitness_score: 1.5
-    max_translation_m: 15.0
-    max_yaw_deg: 45.0
-  rejection_logging:
-    record_candidate_count: true
-    record_fitness: true
-    record_inlier_ratio: true
-    record_transform_magnitude: true
+tf_ownership:
+  default: publish_no_slam_tf
+  mapping:
+    owner: slam_backend_only
+    requires_disabled:
+      - existing_localization_tf_owner
+      - nav2_amcl_tf
+  static_extrinsics:
+    geoje_bag: consume_recorded_tf_static
+    live: publish_only_after_calibration_verification
 
-runtime_health_metrics:
-  required:
-    - front_ingest_contract_status
-    - rear_ingest_contract_status
-    - front_scan_duration_s
-    - rear_scan_duration_s
-    - front_rear_start_skew_ms
-    - front_rejected_packet_count
-    - rear_rejected_packet_count
-    - front_lidar_rate_hz
-    - rear_lidar_rate_hz
-    - imu_rate_hz
-    - wheel_odom_rate_hz
-    - lidar_imu_time_delta_ms
-    - frontend_latency_ms
-    - backend_optimization_time_ms
-    - keyframe_count
-    - submap_count
-    - loop_candidates
-    - accepted_loops
-    - rejected_loops
-    - degeneracy_score
-    - z_drift_estimate_m
-    - map_memory_mb
+health_metrics:
+  ingest:
+    - accepted_and_rejected_scans_per_sensor
+    - frame_ring_and_point_count_contract
+    - packet_timestamp_plateau_length
+    - header_to_receive_delta
+    - peer_start_skew
+  frontend:
+    - input_clouds_expected_and_merged
+    - auxiliary_consumed_missing_stale_and_overflow
+    - deskew_status_and_imu_coverage
+    - registration_fitness_inlier_ratio_and_rmse
+    - correction_translation_and_rotation
+    - shock_quarantine_count
+    - frontend_latency
+  backend:
+    - node_edge_and_loop_counts
+    - residual_before_and_after
+    - solver_iterations_status_and_time
+    - accepted_and_rejected_loop_statistics
 
 validation_ladder:
-  - static_dual_lidar_imu_time_sync_bag
-  - single_front_mid360_lio_bag
-  - single_rear_mid360_lio_bag
-  - dual_mid360_short_loop_bag
-  - rough_outdoor_large_loop_bag
-  - open_field_degeneracy_bag
-  - long_duration_memory_bag
-  - one_lidar_dropout_bag
-  - wheel_slip_bag
+  - synthetic_three_cloud_contract_and_sync_tests
+  - geoje_static_short_bag_ingest_contract
+  - geoje_center_xt32_only_geometry_baseline
+  - geoje_front_jt128_only_geometry_baseline
+  - geoje_rear_jt128_only_geometry_baseline
+  - geoje_three_lidar_packet_deskew_baseline
+  - shock_segment_ablation_without_and_with_deskew
+  - repeated_area_loop_closure_ablation
+  - one_lidar_dropout_and_timestamp_reset
+  - live_ptp_static_recording
+  - live_rough_outdoor_large_loop
+  - long_duration_map_memory_and_persistence
+
+references:
+  - https://github.com/HesaiTechnology/HesaiLidar_ROS_2.0
+  - https://github.com/HesaiTechnology/HesaiLidar_SDK_2.0
+  - https://github.com/hku-mars/FAST_LIO
+  - https://github.com/TixiaoShan/LIO-SAM

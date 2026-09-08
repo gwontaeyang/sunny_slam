@@ -8,17 +8,45 @@ scan_to_map_icp_node:
     odom_frame: odom
     base_frame: base_link
     publish_tf: false
+    pose_graph_marker_topic: /slam_3d/backend/pose_graph_markers
 
-    # Learning-stage inputs. These are PointCloud2 debug streams, not the final
-    # production LIO raw Livox contract.
-    primary_cloud_topic: /slam_3d/input/mid360_front/points_debug
-    secondary_cloud_topic: /slam_3d/input/mid360_rear/points_debug
+    # Canonical PointCloud2 streams produced by slam_3d_lidar_ingest.
+    # XT32 is the trigger stream; the two JT128 scans are consumed once from
+    # bounded queues when their normalized start stamps are close enough.
+    primary_cloud_topic: /slam_3d/input/hesai_center/points_timed
+    secondary_cloud_topic: /slam_3d/input/hesai_front/points_timed
+    tertiary_cloud_topic: /slam_3d/input/hesai_rear/points_timed
     use_secondary_cloud: true
-    cloud_subscription_reliable: false
+    use_tertiary_cloud: true
+    # A registration-only auxiliary contributes to tracking, registration
+    # submaps, and loop geometry verification, but is excluded from place
+    # descriptors and the published global map.
+    secondary_cloud_registration_only: false
+    tertiary_cloud_registration_only: false
+    cloud_subscription_reliable: true
     cloud_subscription_depth: 5
-    max_secondary_stamp_delta_s: 0.05
+    cloud_sync_queue_size: 10
+    max_secondary_stamp_delta_s: 0.01
+    max_auxiliary_stamp_delta_s: 0.01
+    # Wait for an exact match or an auxiliary timestamp watermark before
+    # selecting a nonzero-delta candidate. Enable for deterministic bag replay.
+    cloud_sync_wait_for_nearest_candidate: false
+    # Live operation can degrade after bounded wall time. Deterministic replay
+    # should disable this and resolve missing inputs only by timestamp watermark.
+    cloud_sync_allow_wall_timeout_fallback: true
+    cloud_sync_wait_timeout_s: 0.50
+    cloud_sync_reorder_window_s: 0.02
+    cloud_processing_period_s: 0.005
+    # One thread gives deterministic callback ordering for controlled bag A/B;
+    # retain two threads for the production default and live throughput.
+    executor_thread_count: 2
     wheel_odom_topic: /motor_driver_node/odom
+    wheel_odom_require_expected_frames: true
+    wheel_odom_expected_frame: odom
+    wheel_odom_expected_child_frame: base_link
     imu_topic: /imu/data
+    imu_require_expected_frame: false
+    imu_expected_frame: ""
     use_wheel_prediction: true
     use_constant_velocity_prediction: true
     use_scan_to_scan_prediction: false
@@ -28,14 +56,31 @@ scan_to_map_icp_node:
     use_motion_prior_fallback: false
     add_motion_prior_fallback_keyframes: false
     use_tf_transforms: true
-    deskew_enabled: false
-    deskew_point_time_field: auto
+    reject_cloud_on_tf_failure: true
+    deskew_enabled: true
+    deskew_wait_for_imu_watermark: true
+    deskew_imu_wait_timeout_s: 0.25
+    # Delay map initialization while sensor histories fill. Deterministic bag
+    # profiles should use at least their IMU buffer duration; live default is 0.
+    initialization_warmup_duration_s: 0.0
+    inter_lidar_motion_compensation_enabled: true
+    inter_lidar_motion_compensation_source: wheel_odom
+    inter_lidar_motion_compensation_max_dt_s: 0.05
+    inter_lidar_imu_rotation_scale: 1.0
+    inter_lidar_gap_recovery_hypothesis_enabled: false
+    inter_lidar_gap_recovery_hypothesis_min_gap_s: 0.5
+    inter_lidar_gap_recovery_hypothesis_min_score_improvement_ratio: 0.02
+    inter_lidar_motion_failure_policy: drop_auxiliary
+    reject_cloud_on_deskew_failure: true
+    deskew_point_time_field: offset_time
     deskew_point_time_scale: 0.0
     deskew_point_time_offset_s: 0.0
     deskew_max_scan_duration_s: 0.2
     deskew_max_imu_gap_s: 0.05
     deskew_imu_buffer_duration_s: 5.0
     imu_subscription_depth: 400
+    # Enable only when the IMU publisher offers RELIABLE QoS.
+    imu_subscription_reliable: false
     imu_reorder_tolerance_s: 0.02
     imu_timestamp_reset_threshold_s: 0.5
     deskew_min_time_ratio: 0.5
@@ -45,23 +90,42 @@ scan_to_map_icp_node:
     deskew_imu_to_base_pitch_deg: 0.0
     deskew_imu_to_base_yaw_deg: 0.0
     imu_rotation_prediction_enabled: false
+    imu_rotation_prediction_source: angular_velocity
     imu_rotation_prediction_max_dt_s: 0.5
     imu_rotation_prediction_scale: 1.0
+    imu_orientation_prediction_max_time_delta_s: 0.05
+    # Optional absolute-orientation guard. Keep disabled until the IMU frame,
+    # orientation convention, and extrinsic are validated for the sensor rig.
+    imu_relative_roll_pitch_constraint_enabled: false
+    imu_relative_attitude_max_time_delta_s: 0.05
+    # Zero applies the full measured roll/pitch correction when enabled.
+    imu_relative_roll_pitch_max_correction_deg: 0.0
     imu_roughness_detection_enabled: false
+    imu_shock_policy_enabled: false
     imu_roughness_window_s: 0.35
     imu_roughness_recent_event_window_s: 1.0
     imu_roughness_angular_velocity_threshold_radps: 2.5
     imu_roughness_angular_accel_threshold_radps2: 40.0
     imu_roughness_accel_norm_delta_threshold_mps2: 3.0
     imu_roughness_linear_jerk_threshold_mps3: 60.0
+    imu_shock_hold_duration_s: 0.5
+    imu_shock_recovery_stable_scans: 3
+    suppress_constant_velocity_on_imu_shock: true
+    omit_shock_poses_from_path: true
 
     # Isolated prototype outputs.
     odom_topic: /slam_3d/frontend/odom
     path_topic: /slam_3d/frontend/path
     local_map_topic: /slam_3d/map/active_submap
     global_map_topic: /slam_3d/map/global_cloud
+    terrain_evidence_topic: /slam_3d/terrain/evidence
+    terrain_evidence_colored_topic: /slam_3d/terrain/evidence_colored
+    terrain_support_evidence_topic: /slam_3d/terrain/support_evidence
+    terrain_preview_evidence_topic: /slam_3d/terrain/preview_evidence
     health_topic: /slam_3d/health
     imu_watermark_topic: /slam_3d/imu_watermark_ns
+    publish_preprocessed_scan: false
+    preprocessed_scan_topic: /slam_3d/frontend/deskewed_points
 
     # Registration. GICP is more tolerant than point-to-point ICP for rough
     # outdoor scans, but slower.
@@ -74,8 +138,37 @@ scan_to_map_icp_node:
     robust_registration_refinement_max_correspondence_m: 0.8
     robust_registration_refinement_iterations: 15
     robust_registration_quality_max_correspondence_m: 0.8
+    # Experimental point-to-plane voxel-surfel backend. These parameters are
+    # inert unless registration_method is voxel_surfel.
+    surfel_voxel_size_m: 0.6
+    surfel_min_points_per_voxel: 8
+    surfel_max_planarity_ratio: 0.15
+    surfel_min_tangent_variance: 0.0001
+    surfel_max_plane_distance_m: 0.35
+    surfel_max_center_distance_m: 1.2
+    surfel_min_correspondences: 40
+    surfel_min_correspondence_ratio: 0.20
+    surfel_huber_delta_m: 0.10
+    surfel_max_iterations: 20
+    surfel_max_backtracking_steps: 8
+    surfel_backtracking_factor: 0.5
+    surfel_rotation_convergence_rad: 0.0001
+    surfel_translation_convergence_m: 0.0001
+    surfel_relative_cost_convergence: 0.000001
+    surfel_max_rotation_step_rad: 0.20
+    surfel_max_translation_step_m: 0.50
+    surfel_rotation_scale_m_per_rad: 1.0
+    surfel_relative_eigen_threshold: 0.001
+    surfel_min_observable_rank: 3
+    surfel_max_quality_rmse_m: 0.25
+    surfel_max_quality_p95_m: 0.45
     constant_velocity_translation_limit_m: 2.0
     constant_velocity_rotation_limit_deg: 30.0
+    wheel_odom_buffer_duration_s: 30.0
+    wheel_odom_buffer_max_samples: 5000
+    wheel_odom_max_time_delta_s: 0.15
+    wheel_odom_max_interpolation_gap_s: 0.25
+    wheel_odom_timestamp_reset_threshold_s: 0.5
     motion_prior_fallback_max_step_m: 0.0
     motion_prior_fallback_max_z_step_m: 0.0
     motion_prior_fallback_max_untrusted_distance_m: 0.0
@@ -95,6 +188,10 @@ scan_to_map_icp_node:
     adaptive_scan_voxel_enabled: false
     adaptive_scan_voxel_leaf_m: 0.15
     adaptive_scan_voxel_min_points: 900
+    registration_only_cloud_voxel_leaf_m: 0.30
+    registration_only_cloud_max_point_ratio: 0.50
+    # Zero disables the absolute cap; the ratio limit still applies.
+    registration_only_cloud_max_points: 5000
     map_voxel_leaf_m: 0.35
     min_scan_points: 200
 
@@ -107,14 +204,100 @@ scan_to_map_icp_node:
     crop_min_z: -0.8
     crop_max_z: 0.8
 
+    # Keyframe-bound 3D terrain evidence. This remains separate from the
+    # downstream 2D projection and never treats a no-return as a confirmed drop.
+    terrain_evidence_enabled: false
+    terrain_azimuth_bins: 120
+    terrain_radial_bin_size_m: 0.25
+    terrain_min_range_m: 0.8
+    terrain_max_range_m: 12.0
+    terrain_seed_max_range_m: 3.0
+    terrain_classification_voxel_size_m: 0.10
+    terrain_min_points_per_bin: 2
+    terrain_floor_quantile: 0.20
+    terrain_seed_reference_height_m: 0.0
+    terrain_seed_height_cluster_tolerance_m: 0.10
+    terrain_seed_min_cluster_bins: 3
+    terrain_max_profile_height_above_base_m: 0.50
+    terrain_max_seed_height_delta_m: 0.45
+    terrain_ground_band_m: 0.10
+    terrain_max_adjacent_gap_m: 0.55
+    terrain_floor_max_slope_deg: 4.0
+    terrain_ramp_min_slope_deg: 5.0
+    terrain_ramp_max_slope_deg: 22.0
+    terrain_ramp_min_run_bins: 3
+    terrain_ramp_min_run_length_m: 0.50
+    terrain_ramp_plane_validation_enabled: false
+    terrain_ramp_plane_neighborhood_radius_m: 0.75
+    terrain_ramp_plane_min_points: 12
+    terrain_ramp_plane_min_length_m: 0.50
+    terrain_ramp_plane_min_width_m: 0.20
+    terrain_ramp_plane_max_rmse_m: 0.05
+    terrain_ramp_plane_max_outlier_distance_m: 0.08
+    terrain_ramp_plane_min_inlier_ratio: 0.70
+    terrain_step_min_height_m: 0.08
+    terrain_step_max_height_m: 0.30
+    terrain_drop_min_height_m: 0.12
+    terrain_drop_max_height_m: 0.60
+    terrain_transition_support_bins: 1
+    terrain_staircase_enabled: true
+    terrain_staircase_min_risers: 3
+    terrain_staircase_min_riser_height_m: 0.11
+    terrain_staircase_max_riser_height_m: 0.30
+    terrain_staircase_min_tread_depth_m: 0.15
+    terrain_staircase_max_tread_depth_m: 0.45
+    terrain_staircase_max_riser_height_deviation_m: 0.06
+    terrain_staircase_max_tread_depth_deviation_m: 0.15
+    terrain_staircase_min_slope_deg: 20.0
+    terrain_staircase_max_slope_deg: 55.0
+    terrain_staircase_max_profile_height_above_base_m: 2.0
+    terrain_require_gravity_alignment: true
+    terrain_evidence_voxel_size_m: 0.20
+    terrain_min_confirmations: 2
+    terrain_confirmation_min_viewpoint_distance_m: 0.30
+    terrain_min_view_label_confidence: 0.60
+    terrain_min_label_confidence: 0.60
+    terrain_probable_support_min_confidence: 0.60
+    terrain_probable_support_max_roughness_score: 1.50
+    terrain_probable_support_require_confirmed_connectivity: true
+    terrain_probable_support_max_anchor_distance_m: 0.45
+    terrain_probable_support_max_neighbor_height_delta_m: 0.16
+    terrain_ramp_traversability_scale: 0.75
+    # Observer-only 3D preview/experience memory. Generic/outdoor operation
+    # keeps it disabled; indoor profiles opt in explicitly.
+    terrain_roughness_preview_enabled: false
+    terrain_roughness_min_height_m: 0.025
+    terrain_roughness_max_score: 4.0
+    terrain_traversal_confirmation_enabled: false
+    terrain_traversal_association_radius_m: 0.55
+    terrain_traversal_exit_radius_m: 0.75
+    terrain_traversal_max_vertical_delta_m: 0.40
+    terrain_traversal_max_sample_gap_s: 0.50
+    terrain_traversal_max_swept_segment_length_m: 2.0
+    terrain_preview_min_ahead_distance_m: 0.75
+    terrain_preview_max_lateral_distance_m: 1.00
+    terrain_traversal_min_label_confidence: 0.67
+    terrain_preview_roughness_score_gate: 1.0
+    terrain_preview_ramp_shock_prior: 0.25
+    terrain_preview_positive_step_shock_prior: 1.0
+    terrain_traversal_min_passage_samples: 2
+    terrain_traversal_min_passage_duration_s: 0.05
+
     # Keyframe/local-map policy.
+    mapping_spatial_mode: planar
     keyframe_translation_m: 0.8
     keyframe_rotation_deg: 8.0
+    keyframe_vertical_translation_m: 0.0
+    keyframe_rotation_3d_deg: 0.0
     quarantine_keyframes_on_shock: false
     quarantine_pose_on_shock: false
     record_tracking_scan_on_pose_quarantine: false
+    # This only advances the ephemeral scan-to-scan reference. Shock scans are
+    # still excluded from keyframes, submaps, and pose-graph factors.
+    record_tracking_scan_during_shock: false
     pose_quarantine_tracking_reset_interval: 0
     keyframe_quarantine_correction_translation_m: 0.8
+    place_recognition_registration_only_keyframe_quarantine_correction_translation_m: 0.0
     keyframe_quarantine_correction_rotation_deg: 15.0
     place_recognition_enabled: false
     place_recognition_periodic_enabled: false
@@ -133,15 +316,85 @@ scan_to_map_icp_node:
     place_recognition_max_inlier_rmse_m: 0.8
     place_recognition_max_pose_jump_m: 3.0
     place_recognition_max_pose_jump_rotation_deg: 45.0
+    # Disabled by default. When enabled, only a descriptor-qualified candidate
+    # that passes the frozen mapping-cloud refinement may exceed the normal
+    # pose-jump gate.
+    place_recognition_mapping_refinement_large_pose_jump_enabled: false
+    place_recognition_mapping_refinement_large_pose_jump_max_translation_m: 0.0
+    place_recognition_mapping_refinement_large_pose_jump_max_rotation_deg: 0.0
+    place_recognition_mapping_refinement_large_pose_jump_max_descriptor_distance: 0.0
+    # A large-jump candidate whose frozen-map refinement is stationary may be
+    # accepted only when both poses satisfy these stricter absolute gates.
+    place_recognition_mapping_refinement_large_pose_jump_verified_coarse_enabled: false
+    place_recognition_mapping_refinement_large_pose_jump_verified_coarse_min_inlier_ratio: 0.0
+    place_recognition_mapping_refinement_large_pose_jump_verified_coarse_max_inlier_rmse_m: 0.0
+    place_recognition_mapping_refinement_large_pose_jump_verified_coarse_min_target_coverage_ratio: 0.0
+    place_recognition_mapping_refinement_large_pose_jump_verified_coarse_max_score_regression_ratio: 0.0
     place_recognition_max_yaw_offset_deg: 180.0
+    place_recognition_use_submaps: false
+    place_recognition_submap_min_consecutive_matches: 1
+    # Optional second-stage loop refinement. The source is the map-output
+    # cloud and the target is a frozen, completed historical submap, so the
+    # current and recent scans cannot reinforce their own loop measurement.
+    place_recognition_mapping_cloud_refinement_enabled: false
+    # When enabled, a pose-graph loop is rejected unless this frozen-map
+    # verification succeeds. Disabled by default for compatibility.
+    place_recognition_mapping_refinement_required_for_pose_graph: false
+    place_recognition_mapping_refinement_min_source_points: 200
+    place_recognition_mapping_refinement_min_target_points: 1000
+    # A completed target voxel is retained only after independent keyframes
+    # observed it this many times. The voxel centroid is stored in the frozen
+    # submap anchor frame and never re-fused after loop optimization.
+    place_recognition_mapping_refinement_min_target_keyframe_observations: 2
+    place_recognition_mapping_refinement_target_confirmation_voxel_m: 0.35
+    place_recognition_mapping_refinement_quality_max_correspondence_m: 0.8
+    place_recognition_mapping_refinement_min_inlier_ratio: 0.20
+    # Reverse target-to-source coverage rejects a small scan patch that fits a
+    # large repeated structure. Zero disables this optional gate.
+    place_recognition_mapping_refinement_min_target_coverage_ratio: 0.0
+    place_recognition_mapping_refinement_max_inlier_rmse_m: 0.30
+    place_recognition_mapping_refinement_max_translation_m: 0.75
+    place_recognition_mapping_refinement_max_rotation_deg: 5.0
+    # Keep these at zero for registration backends without Hessian metrics.
+    place_recognition_mapping_refinement_min_observable_rank: 0
+    place_recognition_mapping_refinement_max_hessian_condition: 0.0
+    place_recognition_mapping_refinement_min_score_improvement_ratio: 0.05
+    place_recognition_mapping_refinement_max_primary_score_regression_ratio: 0.05
+    # Optional alignment-gate relaxation after the obstacle-only refinement
+    # above has passed every quality and observability check. Zero preserves
+    # the normal place-recognition correction limits.
+    place_recognition_mapping_refinement_keyframe_quarantine_correction_translation_m: 0.0
+    place_recognition_mapping_refinement_keyframe_quarantine_correction_rotation_deg: 0.0
+    place_recognition_max_vertical_separation_m: 0.0
+    # Optional fail-safe for accumulated vertical drift: descriptors outside
+    # the normal gate are considered only when both scans include a balanced
+    # registration-only support cloud. Zero keeps the recovery disabled.
+    place_recognition_registration_only_vertical_recovery_m: 0.0
+    place_recognition_registration_only_max_pose_jump_m: 0.0
+    # During a registration-only vertical recovery, optionally bind the
+    # recovered pose to the nearest historical pose in the matched submap.
+    # Zero keeps the single-layer assumption disabled.
+    place_recognition_registration_only_same_layer_xy_max_distance_m: 0.0
+    place_recognition_submap_consistency_max_translation_m: 0.0
+    place_recognition_registration_only_consistency_max_translation_m: 0.0
+    place_recognition_registration_only_consistency_max_gap_s: 0.0
+    place_recognition_submap_consistency_max_rotation_deg: 0.0
     pose_graph_correction_enabled: false
     pose_graph_planar_correction_enabled: false
     pose_graph_robust_loop_enabled: false
+    # Seeds a verified large loop by distributing its full SE(3) correction
+    # from the historical anchor to the newest node. The optimizer still must
+    # reduce the robust objective before any keyframe cloud is reprojected.
+    pose_graph_distributed_loop_seed_enabled: false
     planar_pose_constraint_enabled: false
     planar_pose_max_z_correction_m: 0.0
+    ground_vehicle_motion_constraint_enabled: false
+    ground_vehicle_nominal_max_body_z_step_m: 0.0
+    ground_vehicle_roughness_max_body_z_step_m: 0.0
     gravity_roll_pitch_constraint_enabled: false
     gravity_accel_low_pass_alpha: 0.02
     gravity_accel_time_constant_s: 0.0
+    gravity_accel_scale: 1.0
     gravity_accel_min_norm_mps2: 6.0
     gravity_accel_max_norm_mps2: 13.0
     gravity_accel_max_age_s: 0.1
@@ -152,6 +405,16 @@ scan_to_map_icp_node:
     pose_graph_correction_max_translation_m: 5.0
     pose_graph_correction_max_rotation_deg: 45.0
     pose_graph_correction_min_interval_s: 1.0
+    pose_graph_minimum_interval_override_enabled: false
+    pose_graph_duplicate_submap_pair_override_enabled: false
+    pose_graph_duplicate_submap_pair_override_max_edges: 1
+    pose_graph_minimum_interval_override_max_descriptor_distance: 0.12
+    pose_graph_minimum_interval_override_min_inlier_ratio: 0.90
+    pose_graph_minimum_interval_override_max_inlier_rmse_m: 0.15
+    pose_graph_minimum_interval_override_min_target_coverage_ratio: 0.50
+    pose_graph_minimum_interval_override_single_floor_z_enabled: false
+    pose_graph_minimum_interval_override_single_floor_xy_max_distance_m: 1.50
+    pose_graph_minimum_interval_override_single_floor_z_weight_multiplier: 1.0
     pose_graph_optimization_iterations: 25
     pose_graph_optimization_step: 0.15
     pose_graph_odom_translation_weight: 1.0
@@ -166,7 +429,13 @@ scan_to_map_icp_node:
     pose_graph_max_residual_after: 0.0
     pose_graph_max_residual_ratio: 0.0
     local_map_radius_m: 35.0
+    local_map_vertical_radius_m: 0.0
     max_keyframes: 500
     max_local_keyframes: 80
+    submap_enabled: false
+    submap_max_keyframes: 30
+    submap_max_travel_m: 20.0
+    submap_overlap_keyframes: 5
+    max_local_submaps: 3
     max_path_poses: 10000
     map_publish_period_s: 1.0

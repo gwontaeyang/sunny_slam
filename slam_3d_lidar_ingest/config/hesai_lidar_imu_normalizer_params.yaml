@@ -1,0 +1,34 @@
+hesai_imu_normalizer:
+  ros__parameters:
+    input_topic: /hesai/front/lidar_imu
+    output_topic: /slam_3d/input/hesai_front/imu
+    health_topic: /slam_3d/ingest/imu_health
+    expected_input_frame_id: hesai_front
+    output_frame_id: hesai_front
+    require_expected_input_frame: true
+
+    # Production requires a measured common PTP domain for this IMU, the XT32,
+    # and the wheel odometry source.
+    clock_domain: ptp_required_unverified
+    clock_policy: sensor_header
+    time_offset_ns: 0
+    time_scale: 1.0
+    anchor_input_header_ns: 0
+    anchor_output_header_ns: 0
+    calibration_valid_min_input_header_ns: 0
+    calibration_valid_max_input_header_ns: 0
+    max_output_stamp_step_s: 0.25
+    reject_non_increasing_output_stamp: true
+    diagnostic_period_s: 1.0
+    calibration_fit_rmse_ms: -1.0
+    calibration_fit_max_abs_ms: -1.0
+    calibration_id: none
+
+    # Geoje evidence contains degree/s and g although sensor_msgs/Imu requires
+    # rad/s and m/s^2. Keep this conversion explicit and testable.
+    angular_velocity_scale: 0.017453292519943295
+    linear_acceleration_scale: 9.80665
+    input_depth: 400
+    output_depth: 400
+    input_reliable: true
+    output_reliable: true

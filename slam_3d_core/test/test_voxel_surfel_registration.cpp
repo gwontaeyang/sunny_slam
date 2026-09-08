@@ -535,7 +535,9 @@ TEST(VoxelSurfelRegistrationFailure, RejectsNegativeVoxelSize)
 {
   const CloudT target = threeOrthogonalPlanes();
   Registration::Config config = baseConfig();
+  EXPECT_TRUE(Registration::isValidConfig(config));
   config.voxel_size = -0.5;
+  EXPECT_FALSE(Registration::isValidConfig(config));
 
   const Registration::Result result =
     Registration(config).align(target, target, Eigen::Isometry3d::Identity());

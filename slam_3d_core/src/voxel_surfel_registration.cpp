@@ -588,6 +588,11 @@ const VoxelSurfelRegistration::Config & VoxelSurfelRegistration::config() const
   return config_;
 }
 
+bool VoxelSurfelRegistration::isValidConfig(const Config & config)
+{
+  return validConfig(config);
+}
+
 Eigen::Isometry3d VoxelSurfelRegistration::applyIncrement(
   const Eigen::Isometry3d & target_T_source,
   const Vector6d & increment)

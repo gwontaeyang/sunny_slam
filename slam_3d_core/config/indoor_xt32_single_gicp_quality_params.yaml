@@ -1,0 +1,292 @@
+scan_to_map_icp_node:
+  ros__parameters:
+    # Slower GICP quality reference for one center-mounted Hesai XT32.
+    # Use for bounded A/B replays, not as the 10 Hz indoor default.
+    use_sim_time: false
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: false
+
+    primary_cloud_topic: /slam_3d/input/hesai_center/points_timed
+    secondary_cloud_topic: /unused/slam_3d/input/hesai_front/points_timed
+    tertiary_cloud_topic: /unused/slam_3d/input/hesai_rear/points_timed
+    use_secondary_cloud: false
+    use_tertiary_cloud: false
+    cloud_subscription_reliable: false
+    cloud_subscription_depth: 10
+    cloud_sync_queue_size: 20
+    cloud_processing_period_s: 0.005
+    inter_lidar_motion_compensation_enabled: false
+
+    # Wheel odometry is intentionally outside this profile's estimator input.
+    wheel_odom_topic: /unused/wheel_odom_disabled
+    use_wheel_prediction: false
+    # With no wheel prior, a sensor gap can extrapolate stale LiDAR velocity
+    # and repeatedly push GICP outside its correction gate. Start from the last
+    # committed pose; IMU deskew still corrects intra-scan angular motion.
+    use_constant_velocity_prediction: false
+    use_scan_to_scan_prediction: false
+    use_scan_to_scan_fallback: false
+    add_scan_to_scan_fallback_keyframes: false
+    use_motion_prior_fallback: false
+    add_motion_prior_fallback_keyframes: false
+
+    # Hesai ingest normalizes point time to uint32 offset_time in nanoseconds.
+    imu_topic: /imu/data
+    # The validated 04_gangnam recording offers RELIABLE QoS. Inspect the live
+    # publisher before carrying this replay setting to hardware.
+    imu_subscription_reliable: true
+    imu_require_expected_frame: true
+    imu_expected_frame: cv7_link
+    deskew_enabled: true
+    deskew_wait_for_imu_watermark: true
+    deskew_imu_wait_timeout_s: 0.15
+    reject_cloud_on_deskew_failure: true
+    deskew_point_time_field: offset_time
+    deskew_point_time_scale: 0.0
+    deskew_point_time_offset_s: 0.0
+    deskew_max_scan_duration_s: 0.15
+    deskew_max_imu_gap_s: 0.03
+    deskew_imu_buffer_duration_s: 5.0
+    deskew_min_time_ratio: 0.80
+    deskew_time_bin_s: 0.001
+    deskew_angular_velocity_scale: 1.0
+    # The commissioned cv7_link contract uses the native XYZ convention and an
+    # identity base_link->cv7_link rotation. Keep legacy roll=180 replay
+    # workarounds in dataset-specific archived configs only. Physical mounting
+    # and clock offset still require live calibration.
+    deskew_imu_to_base_roll_deg: 0.0
+    deskew_imu_to_base_pitch_deg: 0.0
+    deskew_imu_to_base_yaw_deg: 0.0
+    imu_rotation_prediction_enabled: false
+
+    imu_roughness_detection_enabled: true
+    imu_shock_policy_enabled: true
+    imu_roughness_window_s: 0.15
+    imu_roughness_recent_event_window_s: 0.75
+    imu_roughness_angular_velocity_threshold_radps: 1.2
+    imu_roughness_angular_accel_threshold_radps2: 15.0
+    imu_roughness_accel_norm_delta_threshold_mps2: 1.5
+    imu_roughness_linear_jerk_threshold_mps3: 250.0
+    imu_shock_hold_duration_s: 0.35
+    imu_shock_recovery_stable_scans: 3
+    suppress_constant_velocity_on_imu_shock: true
+    omit_shock_poses_from_path: true
+    quarantine_keyframes_on_shock: true
+    quarantine_pose_on_shock: false
+    record_tracking_scan_on_pose_quarantine: false
+    pose_quarantine_tracking_reset_interval: 0
+    keyframe_quarantine_correction_translation_m: 0.8
+    place_recognition_registration_only_keyframe_quarantine_correction_translation_m: 0.0
+    keyframe_quarantine_correction_rotation_deg: 15.0
+
+    planar_pose_constraint_enabled: false
+    gravity_roll_pitch_constraint_enabled: false
+    gravity_accel_scale: 1.0
+    gravity_accel_low_pass_alpha: 0.02
+    gravity_accel_time_constant_s: 0.7
+    gravity_accel_min_norm_mps2: 7.5
+    gravity_accel_max_norm_mps2: 12.5
+    gravity_accel_max_age_s: 0.03
+    ground_vehicle_motion_constraint_enabled: false
+    ground_vehicle_nominal_max_body_z_step_m: 0.08
+    ground_vehicle_roughness_max_body_z_step_m: 0.08
+
+    use_tf_transforms: true
+    reject_cloud_on_tf_failure: true
+
+    # Conservative indoor frontend: GICP plus a trimmed refinement pass.
+    registration_method: gicp
+    max_icp_iterations: 40
+    icp_max_correspondence_m: 1.2
+    fitness_score_threshold: 0.8
+    robust_registration_enabled: true
+    robust_registration_trim_ratio: 0.85
+    robust_registration_refinement_max_correspondence_m: 0.45
+    robust_registration_refinement_iterations: 12
+    robust_registration_quality_max_correspondence_m: 0.45
+    min_registration_inlier_ratio: 0.25
+    max_registration_inlier_rmse_m: 0.45
+    max_registration_correction_translation_m: 1.5
+    max_registration_correction_rotation_deg: 30.0
+    # Preserve the normal 1.5 m gate, but recover once after a qualified sensor
+    # gap. Poor-overlap candidates and large corrections at normal cadence stay
+    # rejected.
+    registration_gap_relaxation_enabled: true
+    registration_gap_relaxation_min_gap_s: 0.5
+    registration_gap_relaxation_max_speed_mps: 1.5
+    registration_gap_relaxation_max_translation_m: 3.0
+    registration_gap_relaxation_min_inlier_ratio: 0.50
+    registration_gap_relaxation_max_inlier_rmse_m: 0.30
+
+    min_range_m: 0.5
+    max_range_m: 40.0
+    z_min_m: -4.0
+    z_max_m: 6.0
+    scan_voxel_leaf_m: 0.12
+    map_voxel_leaf_m: 0.18
+    min_scan_points: 300
+    crop_box_enabled: true
+    crop_min_x: -0.7
+    crop_max_x: 0.7
+    crop_min_y: -0.55
+    crop_max_y: 0.55
+    crop_min_z: -0.8
+    crop_max_z: 0.9
+
+    terrain_evidence_enabled: true
+    terrain_evidence_topic: /slam_3d/terrain/evidence
+    terrain_evidence_colored_topic: /slam_3d/terrain/evidence_colored
+    terrain_support_evidence_topic: /slam_3d/terrain/support_evidence
+    terrain_preview_evidence_topic: /slam_3d/terrain/preview_evidence
+    terrain_azimuth_bins: 120
+    terrain_radial_bin_size_m: 0.10
+    terrain_min_range_m: 0.8
+    terrain_max_range_m: 12.0
+    terrain_seed_max_range_m: 6.0
+    terrain_classification_voxel_size_m: 0.04
+    terrain_min_points_per_bin: 1
+    terrain_floor_quantile: 0.05
+    terrain_seed_reference_height_m: 0.0
+    terrain_seed_height_cluster_tolerance_m: 0.10
+    terrain_seed_min_cluster_bins: 3
+    terrain_max_profile_height_above_base_m: 0.35
+    terrain_max_seed_height_delta_m: 0.45
+    terrain_ground_band_m: 0.10
+    terrain_max_adjacent_gap_m: 0.35
+    terrain_floor_max_slope_deg: 4.0
+    terrain_ramp_min_slope_deg: 5.0
+    terrain_ramp_max_slope_deg: 22.0
+    terrain_ramp_min_run_bins: 3
+    terrain_ramp_min_run_length_m: 0.50
+    terrain_ramp_plane_validation_enabled: true
+    terrain_ramp_plane_neighborhood_radius_m: 0.75
+    terrain_ramp_plane_min_points: 12
+    terrain_ramp_plane_min_length_m: 0.50
+    terrain_ramp_plane_min_width_m: 0.20
+    terrain_ramp_plane_max_rmse_m: 0.05
+    terrain_ramp_plane_max_outlier_distance_m: 0.08
+    terrain_ramp_plane_min_inlier_ratio: 0.70
+    terrain_step_min_height_m: 0.08
+    terrain_step_max_height_m: 0.30
+    terrain_drop_min_height_m: 0.12
+    terrain_drop_max_height_m: 0.60
+    terrain_transition_support_bins: 2
+    terrain_staircase_enabled: true
+    terrain_staircase_min_risers: 3
+    terrain_staircase_min_riser_height_m: 0.11
+    terrain_staircase_max_riser_height_m: 0.30
+    terrain_staircase_min_tread_depth_m: 0.15
+    terrain_staircase_max_tread_depth_m: 0.45
+    terrain_staircase_max_riser_height_deviation_m: 0.06
+    terrain_staircase_max_tread_depth_deviation_m: 0.15
+    terrain_staircase_min_slope_deg: 20.0
+    terrain_staircase_max_slope_deg: 55.0
+    terrain_staircase_max_profile_height_above_base_m: 2.0
+    terrain_require_gravity_alignment: true
+    terrain_evidence_voxel_size_m: 0.20
+    terrain_min_confirmations: 2
+    terrain_confirmation_min_viewpoint_distance_m: 0.30
+    terrain_min_view_label_confidence: 0.67
+    terrain_min_label_confidence: 0.67
+    terrain_probable_support_min_confidence: 0.60
+    terrain_probable_support_max_roughness_score: 1.50
+    terrain_probable_support_require_confirmed_connectivity: true
+    terrain_probable_support_max_anchor_distance_m: 0.45
+    terrain_probable_support_max_neighbor_height_delta_m: 0.16
+    terrain_ramp_traversability_scale: 0.75
+    # Observer-only preview/experience memory; no frontend or graph constraint.
+    terrain_roughness_preview_enabled: true
+    terrain_roughness_min_height_m: 0.025
+    terrain_roughness_max_score: 4.0
+    terrain_traversal_confirmation_enabled: true
+    terrain_traversal_association_radius_m: 0.75
+    terrain_traversal_exit_radius_m: 0.95
+    terrain_traversal_max_vertical_delta_m: 0.40
+    terrain_traversal_max_sample_gap_s: 1.00
+    terrain_traversal_max_swept_segment_length_m: 2.0
+    terrain_preview_min_ahead_distance_m: 0.75
+    terrain_preview_max_lateral_distance_m: 1.00
+    terrain_traversal_min_label_confidence: 0.67
+    terrain_preview_roughness_score_gate: 1.0
+    terrain_preview_ramp_shock_prior: 0.25
+    terrain_preview_positive_step_shock_prior: 1.0
+    terrain_traversal_min_passage_samples: 2
+    terrain_traversal_min_passage_duration_s: 0.05
+
+    # Full SE(3) keyframes preserve stairs, ramps, and non-planar body motion.
+    mapping_spatial_mode: se3
+    keyframe_translation_m: 0.45
+    keyframe_rotation_deg: 5.0
+    keyframe_vertical_translation_m: 0.20
+    keyframe_rotation_3d_deg: 6.0
+    local_map_radius_m: 15.0
+    local_map_vertical_radius_m: 3.0
+    max_local_keyframes: 72
+    max_keyframes: 3000
+    max_path_poses: 30000
+    map_publish_period_s: 2.0
+
+    # Overlapping submaps bound the active registration target and provide a
+    # more stable loop-registration target than an individual keyframe.
+    submap_enabled: true
+    submap_max_keyframes: 24
+    submap_max_travel_m: 10.0
+    submap_overlap_keyframes: 5
+    max_local_submaps: 3
+
+    place_recognition_enabled: true
+    place_recognition_periodic_enabled: true
+    place_recognition_require_pose_graph_correction: true
+    place_recognition_periodic_min_interval_s: 2.0
+    place_recognition_relocalization_min_interval_s: 2.0
+    place_recognition_shock_relocalization_cooldown_s: 2.0
+    place_recognition_descriptor_bins: 60
+    place_recognition_descriptor_rings: 20
+    place_recognition_min_keyframes: 40
+    place_recognition_exclude_recent_keyframes: 30
+    place_recognition_max_candidates: 6
+    place_recognition_candidate_map_neighbors: 6
+    place_recognition_max_descriptor_distance: 0.22
+    place_recognition_min_inlier_ratio: 0.35
+    place_recognition_max_inlier_rmse_m: 0.45
+    place_recognition_max_pose_jump_m: 4.0
+    place_recognition_max_pose_jump_rotation_deg: 35.0
+    place_recognition_max_yaw_offset_deg: 180.0
+    place_recognition_use_submaps: true
+    place_recognition_submap_min_consecutive_matches: 2
+    place_recognition_max_vertical_separation_m: 2.0
+    place_recognition_submap_consistency_max_translation_m: 0.75
+    place_recognition_submap_consistency_max_rotation_deg: 8.0
+
+    # The backend remains 3D. New loop edges must survive robust weighting and
+    # must reduce the graph objective before their correction is committed.
+    pose_graph_correction_enabled: true
+    pose_graph_planar_correction_enabled: false
+    pose_graph_robust_loop_enabled: true
+    pose_graph_correction_min_keyframes: 12
+    pose_graph_correction_max_translation_m: 4.0
+    pose_graph_correction_max_rotation_deg: 35.0
+    pose_graph_correction_min_interval_s: 2.0
+    pose_graph_optimization_iterations: 40
+    pose_graph_optimization_step: 0.12
+    pose_graph_odom_translation_weight: 1.0
+    pose_graph_odom_rotation_weight: 1.0
+    pose_graph_loop_translation_weight: 2.0
+    pose_graph_loop_rotation_weight: 1.5
+    pose_graph_loop_cauchy_scale: 1.0
+    pose_graph_min_new_loop_robust_weight: 0.08
+    pose_graph_max_iteration_translation_step_m: 0.15
+    pose_graph_max_iteration_rotation_step_deg: 3.0
+    pose_graph_max_loop_residual_before: 12.0
+    pose_graph_max_residual_after: 2.0
+    pose_graph_max_residual_ratio: 1.0
+
+    odom_topic: /slam_3d/frontend/odom
+    path_topic: /slam_3d/frontend/path
+    local_map_topic: /slam_3d/map/active_submap
+    global_map_topic: /slam_3d/map/global_cloud
+    health_topic: /slam_3d/health
+    imu_watermark_topic: /slam_3d/imu_watermark_ns
+    pose_graph_marker_topic: /slam_3d/backend/pose_graph_markers

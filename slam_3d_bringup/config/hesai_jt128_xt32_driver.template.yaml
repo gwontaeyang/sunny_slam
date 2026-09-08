@@ -1,0 +1,89 @@
+# Template only. Fill device IPs, host interface, correction files, and
+# firetime files from the commissioned installation before hardware bringup.
+# Configure the three devices to send to distinct host UDP ports. The Hesai
+# SDK opens one receive socket per lidar and does not demultiplex a shared port
+# by device_ip_address.
+lidar:
+  - driver:
+      use_gpu: false
+      source_type: 1
+      lidar_udp_type:
+        device_ip_address: CHANGE_ME_FRONT_JT128_IP
+        udp_port: 2368
+        ptc_port: 9347
+        multicast_ip_address: 255.255.255.255
+        use_ptc_connected: true
+        host_ip_address: CHANGE_ME_HOST_IP
+        correction_file_path: CHANGE_ME_FRONT_CORRECTION_FILE
+        firetimes_path: CHANGE_ME_FRONT_FIRETIME_FILE
+      use_timestamp_type: 0
+      frame_start_azimuth: 0
+      thread_num: 4
+      transform_flag: false
+      enable_packet_loss_tool: true
+      default_frame_frequency: 10.0
+    ros:
+      ros_frame_id: hesai_front
+      ros_send_point_cloud_topic: /hesai/front/lidar_points
+      ros_send_packet_topic: /hesai/front/lidar_packets
+      ros_send_packet_loss_topic: /hesai/front/packet_loss
+      ros_send_ptp_topic: /hesai/front/ptp
+      send_packet_ros: false
+      send_point_cloud_ros: true
+      send_imu_ros: false
+
+  - driver:
+      use_gpu: false
+      source_type: 1
+      lidar_udp_type:
+        device_ip_address: CHANGE_ME_REAR_JT128_IP
+        udp_port: 2369
+        ptc_port: 9347
+        multicast_ip_address: 255.255.255.255
+        use_ptc_connected: true
+        host_ip_address: CHANGE_ME_HOST_IP
+        correction_file_path: CHANGE_ME_REAR_CORRECTION_FILE
+        firetimes_path: CHANGE_ME_REAR_FIRETIME_FILE
+      use_timestamp_type: 0
+      frame_start_azimuth: 0
+      thread_num: 4
+      transform_flag: false
+      enable_packet_loss_tool: true
+      default_frame_frequency: 10.0
+    ros:
+      ros_frame_id: hesai_rear
+      ros_send_point_cloud_topic: /hesai/rear/lidar_points
+      ros_send_packet_topic: /hesai/rear/lidar_packets
+      ros_send_packet_loss_topic: /hesai/rear/packet_loss
+      ros_send_ptp_topic: /hesai/rear/ptp
+      send_packet_ros: false
+      send_point_cloud_ros: true
+      send_imu_ros: false
+
+  - driver:
+      use_gpu: false
+      source_type: 1
+      lidar_udp_type:
+        device_ip_address: CHANGE_ME_CENTER_XT32_IP
+        udp_port: 2370
+        ptc_port: 9347
+        multicast_ip_address: 255.255.255.255
+        use_ptc_connected: true
+        host_ip_address: CHANGE_ME_HOST_IP
+        correction_file_path: CHANGE_ME_CENTER_CORRECTION_FILE
+        firetimes_path: CHANGE_ME_CENTER_FIRETIME_FILE
+      use_timestamp_type: 0
+      frame_start_azimuth: 0
+      thread_num: 4
+      transform_flag: false
+      enable_packet_loss_tool: true
+      default_frame_frequency: 10.0
+    ros:
+      ros_frame_id: hesai_center
+      ros_send_point_cloud_topic: /hesai/center/lidar_points
+      ros_send_packet_topic: /hesai/center/lidar_packets
+      ros_send_packet_loss_topic: /hesai/center/packet_loss
+      ros_send_ptp_topic: /hesai/center/ptp
+      send_packet_ros: false
+      send_point_cloud_ros: true
+      send_imu_ros: false
