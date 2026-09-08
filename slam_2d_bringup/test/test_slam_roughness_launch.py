@@ -77,7 +77,7 @@ def node_parameters(launch_description, context, node_name):
     return evaluated[0]
 
 
-def test_roughness_innovation_is_wired_but_disabled_by_default():
+def test_custom_frontend_is_default_with_interventions_disabled():
     module = load_launch_module()
     launch_description = module.generate_launch_description()
 
@@ -97,7 +97,7 @@ def test_roughness_innovation_is_wired_but_disabled_by_default():
         default_value(
             declarations["use_roughness_innovation_slam_toolbox"]
         )
-        == "false"
+        == "true"
     )
     assert (
         default_value(
@@ -301,7 +301,7 @@ def test_live_roughness_features_require_custom_frontend():
         module.validate_roughness_innovation_frontend(context)
 
 
-def test_bag_roughness_innovation_frontend_is_opt_in_and_observe_by_default():
+def test_bag_custom_frontend_is_default_and_observe_only():
     module = load_bag_launch_module()
     launch_description = module.generate_launch_description()
     declarations = {
@@ -319,7 +319,7 @@ def test_bag_roughness_innovation_frontend_is_opt_in_and_observe_by_default():
         default_value(
             declarations["use_roughness_innovation_slam_toolbox"]
         )
-        == "false"
+        == "true"
     )
     assert default_value(declarations["roughness_innovation_mode"]) == "observe"
     assert (
@@ -725,7 +725,7 @@ def test_slam_bringup_applies_only_explicit_typed_overrides():
     }
 
 
-def test_slam_bringup_custom_frontend_is_opt_in_and_uses_profile():
+def test_slam_bringup_custom_frontend_uses_profile():
     module = load_bringup_launch_module()
     package_share = Path(get_package_share_directory("slam_2d_bringup"))
     context = LaunchContext()
@@ -793,6 +793,131 @@ def test_slam_bringup_custom_frontend_is_opt_in_and_uses_profile():
     )
     assert evaluated[2]["roughness_spatial_passage_radius_m"] == 0.65
     assert evaluated[2]["roughness_spatial_passage_max_age_s"] == 4.25
+
+
+@pytest.mark.parametrize("loader", [load_launch_module, load_bag_launch_module])
+@pytest.mark.parametrize("custom", ["true", "false"])
+def test_exactly_one_selected_mapper(loader, custom):
+    module = loader()
+    description = module.generate_launch_description()
+    context = context_with_declared_defaults(description, {
+        "use_roughness_innovation_slam_toolbox": custom,
+    })
+    active = [entity for entity in description.entities
+              if isinstance(entity, Node)
+              and getattr(entity, "_Node__node_name", None) == "slam_toolbox"
+              and (entity.condition is None or entity.condition.evaluate(context))]
+    assert len(active) == 1
+    expected = ("roughness_aware_slam_toolbox_node" if custom == "true"
+                else "sync_slam_toolbox_node")
+    assert getattr(active[0], "_Node__node_executable", None) == expected
+
+
+def test_compatibility_bringup_defaults_to_custom():
+    module = load_bringup_launch_module()
+    description = module.generate_launch_description()
+    context = context_with_declared_defaults(description)
+    assert context.launch_configurations["use_roughness_innovation_slam_toolbox"] == "true"
+    actions = module.launch_slam_toolbox(context)
+    assert getattr(actions[0], "_Node__node_executable", None) == (
+        "roughness_aware_slam_toolbox_node")
+
+
+def test_live_default_profile_does_not_enable_experimental_interventions():
+    module = load_launch_module()
+    description = module.generate_launch_description()
+    context = context_with_declared_defaults(description)
+    module.validate_roughness_innovation_frontend(context)
+    node = next(entity for entity in description.entities
+                if isinstance(entity, Node)
+                and getattr(entity, "_Node__node_executable", None)
+                == "roughness_aware_slam_toolbox_node")
+    params = {}
+    for layer in evaluate_parameters(context, getattr(node, "_Node__parameters")):
+        if isinstance(layer, dict):
+            params.update(layer)
+        else:
+            profile = yaml.safe_load(Path(layer).read_text())
+            params.update(profile["slam_toolbox"]["ros__parameters"])
+    assert params["roughness_constraint_mode"] == "adaptive_memory_observe"
+    assert params["roughness_innovation_mode"] == "observe"
+    for key in ("roughness_enable_near_chain_gate",
+                "roughness_enable_spatial_memory_gate",
+                "roughness_enable_spatial_passage_hysteresis",
+                "enable_roughness_scan_conditioning",
+                "roughness_place_enable_reference_chain_observer"):
+        assert params[key] is False
+
+
+def load_share_module(relative_path):
+    path = Path(get_package_share_directory("slam_2d_bringup")) / relative_path
+    spec = importlib.util.spec_from_file_location("handover_test_module", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("custom", ["true", "false"])
+@pytest.mark.parametrize("start", ["true", "false"])
+def test_simple_replay_selects_custom_without_lifecycle_wait(custom, start):
+    from launch.actions import ExecuteProcess, IncludeLaunchDescription
+    module = load_share_module("launch/slam_from_bag.launch.py")
+    description = module.generate_launch_description()
+    context = context_with_declared_defaults(description, {
+        "use_roughness_innovation_slam_toolbox": custom,
+        "start_slam": start,
+        "bag_file": "/offline/test_bag",
+    })
+    includes = [entity for entity in description.entities
+                if isinstance(entity, IncludeLaunchDescription)
+                and entity.condition.evaluate(context)]
+    assert len(includes) == int(custom == "true" and start == "true")
+    playback = [entity for entity in description.entities
+                if isinstance(entity, ExecuteProcess) and not isinstance(entity, Node)
+                and entity.condition.evaluate(context)]
+    expected = start == "false" or custom == "true"
+    assert len(playback) == int(expected)
+
+
+def test_simple_replay_rejects_two_map_odom_publishers():
+    module = load_share_module("launch/slam_from_bag.launch.py")
+    description = module.generate_launch_description()
+    context = context_with_declared_defaults(description, {"use_static_map_odom": "true"})
+    with pytest.raises(RuntimeError, match="cannot run together"):
+        module.validate_tf_ownership(context)
+    context.launch_configurations["start_slam"] = "false"
+    assert module.validate_tf_ownership(context) == []
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_readiness_rejects_invalid_rate_or_timeout(value):
+    import argparse
+    module = load_share_module("scripts/play_after_slam_ready.py")
+    with pytest.raises(argparse.ArgumentTypeError):
+        module.positive_float(value)
+
+
+@pytest.mark.parametrize("responds,typed,expected", [
+    (True, True, True), (True, False, False), (False, False, False),
+])
+def test_readiness_requires_configured_custom_response(monkeypatch, responds, typed, expected):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    module = load_share_module("scripts/play_after_slam_ready.py")
+    future = Mock()
+    future.done.return_value = responds
+    future.result.return_value = SimpleNamespace(values=[SimpleNamespace(type=4 if typed else 0)])
+    client = Mock()
+    client.wait_for_service.return_value = True
+    client.call_async.return_value = future
+    node = Mock()
+    node.create_client.return_value = client
+    monkeypatch.setattr(module.rclpy, "ok", Mock(side_effect=[True, False]))
+    monkeypatch.setattr(module.rclpy, "spin_until_future_complete", Mock())
+    assert module.wait_for_slam(node, 1.0) is expected
+    node.destroy_client.assert_called_once_with(client)
+    if not responds:
+        future.cancel.assert_called_once()
 
 
 @pytest.mark.parametrize(

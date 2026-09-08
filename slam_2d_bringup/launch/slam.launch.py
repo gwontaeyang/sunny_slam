@@ -210,9 +210,9 @@ def generate_launch_description():
     )
     declare_use_roughness_innovation_slam_toolbox = DeclareLaunchArgument(
         "use_roughness_innovation_slam_toolbox",
-        default_value="false",
+        default_value="true",
         description=(
-            "Use the IMU roughness-aware slam_toolbox frontend when true."
+            "Use the custom 2D SLAM frontend (default). Set false for stock Toolbox."
         ),
     )
     declare_roughness_innovation_params_file = DeclareLaunchArgument(
