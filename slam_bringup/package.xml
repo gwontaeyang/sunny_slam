@@ -12,6 +12,7 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>lio_sam</exec_depend>
   <exec_depend>slam_2d_bringup</exec_depend>
   <exec_depend>slam_3d_bringup</exec_depend>
 

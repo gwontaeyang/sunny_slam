@@ -25,9 +25,27 @@ def create_package_launch(package_name, launch_file, launch_args=None, condition
     return GroupAction(actions=[IncludeLaunchDescription(**kwargs)], scoped=True)
 
 
-def slam_type_condition(expected_type):
+def nd_condition():
+    robot_model = LaunchConfiguration("robot_model")
+    return IfCondition(PythonExpression(["'", robot_model, "'.lower() == 'nd'"]))
+
+
+def non_nd_slam_type_condition(expected_type):
     slam_type = LaunchConfiguration("slam_type")
-    return IfCondition(PythonExpression(["'", slam_type, "'.lower() == '", expected_type, "'"]))
+    robot_model = LaunchConfiguration("robot_model")
+    return IfCondition(
+        PythonExpression(
+            [
+                "'",
+                slam_type,
+                "'.lower() == '",
+                expected_type,
+                "' and '",
+                robot_model,
+                "'.lower() != 'nd'",
+            ]
+        )
+    )
 
 
 def generate_launch_description():
@@ -67,7 +85,16 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "slam_type",
             default_value="2d",
-            description="SLAM stack to launch: 2d or 3d.",
+            description="SLAM stack to launch for non-ND robots: 2d or 3d.",
+        ),
+        DeclareLaunchArgument(
+            "liosam_params_file",
+            default_value=os.path.join(
+                get_package_share_directory("lio_sam"),
+                "config",
+                "params.yaml",
+            ),
+            description="LIO-SAM parameter file used by the ND SLAM path.",
         ),
     ]
 
@@ -78,13 +105,24 @@ def generate_launch_description():
                 "slam_2d_bringup",
                 "slam.launch.py",
                 common_args,
-                condition=slam_type_condition("2d"),
+                condition=non_nd_slam_type_condition("2d"),
             ),
             create_package_launch(
                 "slam_3d_bringup",
                 "dual_mid360_3d_slam.launch.py",
                 common_args,
-                condition=slam_type_condition("3d"),
+                condition=non_nd_slam_type_condition("3d"),
+            ),
+            create_package_launch(
+                "lio_sam",
+                "run.launch.py",
+                {
+                    "params_file": LaunchConfiguration("liosam_params_file"),
+                    "use_sim_time": use_sim_time,
+                    "use_rviz": "false",
+                    "publish_static_map_to_odom": "false",
+                },
+                condition=nd_condition(),
             ),
         ]
     )
