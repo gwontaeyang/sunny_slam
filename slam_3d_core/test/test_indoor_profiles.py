@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from parameter_helpers import effective_parameters
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = PACKAGE_ROOT / "config"
@@ -18,7 +19,7 @@ def _load_profile(name):
     with path.open("r", encoding="utf-8") as stream:
         document = yaml.safe_load(stream)
     assert set(document) == {"scan_to_map_icp_node"}
-    return document["scan_to_map_icp_node"]["ros__parameters"]
+    return effective_parameters(document["scan_to_map_icp_node"]["ros__parameters"])
 
 
 def _flatten_keys(value, prefix=""):
@@ -30,6 +31,23 @@ def _flatten_keys(value, prefix=""):
         keys.append(qualified.lower())
         keys.extend(_flatten_keys(child, qualified))
     return keys
+
+
+@pytest.mark.parametrize("profile_name", PROFILES)
+def test_compact_profiles_keep_explicit_sensor_calibration(profile_name):
+    explicit = yaml.safe_load((CONFIG_DIR / PROFILES[profile_name]).read_text())[
+        "scan_to_map_icp_node"
+    ]["ros__parameters"]
+    params = _load_profile(profile_name)
+    assert len(explicit) < len(params) // 2
+    for key in (
+        "primary_cloud_topic", "imu_topic", "imu_expected_frame",
+        "deskew_point_time_field", "deskew_point_time_scale", "deskew_point_time_offset_s",
+        "deskew_angular_velocity_scale", "deskew_imu_to_base_roll_deg",
+        "deskew_imu_to_base_pitch_deg", "deskew_imu_to_base_yaw_deg", "gravity_accel_scale",
+        "use_wheel_prediction", "pose_graph_solver",
+    ):
+        assert explicit[key] == params[key]
 
 
 @pytest.mark.parametrize("profile_name", PROFILES)
@@ -288,9 +306,26 @@ def test_profiles_require_confirmed_submap_loops_and_robust_graph(profile_name):
     assert params["place_recognition_submap_consistency_max_rotation_deg"] > 0.0
     assert params["place_recognition_require_pose_graph_correction"] is True
     assert params["pose_graph_correction_enabled"] is True
+    assert params["pose_graph_solver"] == "ceres_se3"
+    assert params["pose_graph_information_mode"] == "configured_diagonal"
+    relative_threshold = params["pose_graph_information_relative_eigen_threshold"]
+    strong_ratio = params["pose_graph_information_strong_eigenvalue_ratio"]
+    weak_ratio = params["pose_graph_information_weak_ratio"]
+    assert 0.0 < relative_threshold <= strong_ratio <= 1.0
+    assert 0.0 < weak_ratio < 1.0
     assert params["pose_graph_planar_correction_enabled"] is False
     assert params["pose_graph_robust_loop_enabled"] is True
     assert params["pose_graph_loop_cauchy_scale"] > 0.0
+    robust_stages = params["pose_graph_ceres_robust_scale_factors"]
+    assert robust_stages == sorted(robust_stages, reverse=True)
+    assert robust_stages[-1] == pytest.approx(1.0)
+    assert params["pose_graph_ceres_max_iterations_per_stage"] >= 10
+    assert params["pose_graph_ceres_dcs_enabled"] is True
+    assert params["pose_graph_ceres_dcs_start_stage"] == 0
+    assert params["pose_graph_ceres_dcs_phi"] > 0.0
+    assert 0.0 < params["pose_graph_ceres_dcs_min_scale"] < 1.0
+    assert params["pose_graph_ceres_num_threads"] >= 1
+    assert params["pose_graph_ceres_use_nonmonotonic_steps"] is False
     assert 0.0 < params["pose_graph_min_new_loop_robust_weight"] <= 1.0
     assert params["pose_graph_max_iteration_translation_step_m"] > 0.0
     assert params["pose_graph_max_iteration_rotation_step_deg"] > 0.0
@@ -309,6 +344,76 @@ def test_profiles_do_not_enable_dynamic_object_processing(profile_name):
         for key in _flatten_keys(params)
         for fragment in forbidden_fragments
     )
+
+
+@pytest.mark.parametrize("profile_name", PROFILES)
+def test_profiles_leave_cleanup_offline_and_archive_opt_in(profile_name):
+    params = _load_profile(profile_name)
+
+    assert params["temporal_static_map_enabled"] is False
+    assert {
+        key for key in params if key.startswith("temporal_static_map_")
+    } == {"temporal_static_map_enabled"}
+    assert params["keyframe_archive_directory"] == ""
+    assert params["keyframe_archive_voxel_leaf_m"] == pytest.approx(0.22)
+    assert params["global_map_topic"] == "/slam_3d/map/global_cloud"
+
+
+@pytest.mark.parametrize("filename", [
+    "indoor_compute_budget_overrides.yaml", "indoor_cpu_minimal_overrides.yaml",
+])
+def test_compute_budget_override_does_not_reenable_online_cleanup(filename):
+    path = CONFIG_DIR / filename
+    with path.open("r", encoding="utf-8") as stream:
+        overrides = yaml.safe_load(stream)["scan_to_map_icp_node"]["ros__parameters"]
+
+    assert not any(key.startswith("temporal_static_map_") for key in overrides)
+    for profile_name in PROFILES:
+        params = {**_load_profile(profile_name), **overrides}
+        assert params["temporal_static_map_enabled"] is False
+        assert params["keyframe_archive_directory"] == ""
+        assert params["keyframe_archive_voxel_leaf_m"] == pytest.approx(0.22)
+
+
+@pytest.mark.parametrize("profile_name", PROFILES)
+@pytest.mark.parametrize("solver", ["ceres", "g2o", "gtsam"])
+def test_cpu_minimal_preserves_sensor_and_solver_contracts(profile_name, solver):
+    base = _load_profile(profile_name)
+    overrides = yaml.safe_load(
+        (CONFIG_DIR / "indoor_cpu_minimal_overrides.yaml").read_text()
+    )["scan_to_map_icp_node"]["ros__parameters"]
+    selection = yaml.safe_load(
+        (CONFIG_DIR / f"pose_graph_{solver}_solver_overrides.yaml").read_text()
+    )["scan_to_map_icp_node"]["ros__parameters"]
+    assert selection == {"pose_graph_solver": f"{solver}_se3"}
+    protected_fragments = ("deskew", "imu", "wheel", "topic", "frame_id", "clock")
+    assert not any(
+        fragment in key for key in overrides for fragment in protected_fragments
+    )
+    assert "pose_graph_solver" not in overrides
+    params = {**base, **overrides, **selection}
+    for key in ("use_tf_transforms", "use_secondary_cloud", "use_tertiary_cloud",
+                "pose_graph_correction_enabled", "pose_graph_planar_correction_enabled"):
+        assert params[key] == base[key]
+    assert params["pose_graph_solver"] == f"{solver}_se3"
+    assert params["registration_method"] == "voxel_surfel"
+
+
+def test_cpu_minimal_reduces_compute_budgets():
+    old, new = [yaml.safe_load((CONFIG_DIR / filename).read_text())
+                ["scan_to_map_icp_node"]["ros__parameters"] for filename in (
+                    "indoor_compute_budget_overrides.yaml",
+                    "indoor_cpu_minimal_overrides.yaml")]
+    for key in ("max_range_m", "surfel_max_iterations", "surfel_max_backtracking_steps",
+                "local_map_radius_m", "max_local_keyframes", "max_local_submaps",
+                "place_recognition_max_candidates",
+                "pose_graph_ceres_max_iterations_per_stage"):
+        assert 0 < new[key] < old[key]
+    for key in ("scan_voxel_leaf_m", "map_voxel_leaf_m", "keyframe_translation_m",
+                "map_publish_period_s", "place_recognition_periodic_min_interval_s"):
+        assert new[key] > old[key]
+    assert new["pose_graph_ceres_robust_scale_factors"] == [1.0]
+    assert new["cloud_processing_period_s"] == old["cloud_processing_period_s"]
 
 
 @pytest.mark.parametrize("profile_name", PROFILES)

@@ -1,4 +1,6 @@
 projection:
+  # Terrain evidence is estimated at 5 cm. Use refine_nav_grid_resolution to
+  # rerasterize final obstacle points into the 2 cm Nav2 output grid.
   resolution_m: 0.05
   bounds_quantile_low: 0.001
   bounds_quantile_high: 0.999
@@ -50,9 +52,9 @@ projection:
   trajectory_max_segment_yaw_deg: 45.0
   trajectory_max_segment_dt_s: 0.50
   obstacle_keep_distance_to_free_m: 0.80
-  # Reconstruct at most one 5 cm raster gap. Keep robot-footprint inflation in
-  # Nav2, where the configured footprint and inflation layer are reviewable.
-  obstacle_closing_radius_m: 0.05
+  # Reconnect wall samples from the coarser temporal-static point map without
+  # inflating the final wall envelope; Nav2 remains responsible for inflation.
+  obstacle_closing_radius_m: 0.12
   obstacle_dilation_radius_m: 0.0
 
   # Below-floor returns and floor geometry outside provisional mobility limits
@@ -68,6 +70,25 @@ projection:
   single_level_xy_bin_m: 0.25
   single_level_max_z_span_m: 0.75
 
+  # Keep enclosed but unobserved floor UNKNOWN by default. Enable this only for
+  # a reviewed single-floor map where topology inference is acceptable.
+  fill_enclosed_unknown_as_free: false
+
   free_value: 254
   occupied_value: 0
   unknown_value: 205
+
+# Offline connectivity audit only. Nav2 remains the online planner. The 5 cm
+# occupancy grid is unchanged; the coarser primitive limits A* state growth on
+# the current 76 x 110 m indoor/outdoor transition map.
+path_planning:
+  robot_footprint_length_m: 1.066
+  robot_footprint_width_m: 0.88
+  heading_bins: 8
+  translation_step_m: 0.20
+  allow_reverse: true
+  reverse_cost_multiplier: 1.20
+  turn_cost_m: 0.12
+  clearance_cost_weight: 0.02
+  goal_tolerance_m: 0.25
+  max_expansions: 2000000

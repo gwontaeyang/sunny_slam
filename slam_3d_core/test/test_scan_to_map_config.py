@@ -2,21 +2,57 @@ import importlib.util
 import math
 from pathlib import Path
 
+import pytest
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchContext
 from launch.actions import DeclareLaunchArgument
+
+from parameter_helpers import effective_parameters
 
 
 def _load_named_params(filename):
     package_share = Path(get_package_share_directory("slam_3d_core"))
     params_path = package_share / "config" / filename
     with params_path.open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)["scan_to_map_icp_node"]["ros__parameters"]
+        params = yaml.safe_load(handle)["scan_to_map_icp_node"]["ros__parameters"]
+    return effective_parameters(params)
 
 
 def _load_params():
     return _load_named_params("scan_to_map_icp_params.yaml")
+
+
+@pytest.mark.parametrize("solver", ["ceres_se3", "g2o_se3", "gtsam_se3"])
+@pytest.mark.parametrize(
+    "profile",
+    [
+        "indoor_xt32_single_params.yaml",
+        "indoor_xt32_single_gicp_quality_params.yaml",
+        "indoor_dual_jt128_params.yaml",
+    ],
+)
+def test_solver_overlays_change_only_backend_and_preserve_robust_schedule(solver, profile):
+    # Read source overlays so this contract also runs before a new install.
+    config_dir = Path(__file__).resolve().parents[1] / "config"
+    filename = f"pose_graph_{solver.removesuffix('_se3')}_solver_overrides.yaml"
+    overlay = yaml.safe_load((config_dir / filename).read_text(encoding="utf-8"))[
+        "scan_to_map_icp_node"
+    ]["ros__parameters"]
+    base = yaml.safe_load((config_dir / profile).read_text(encoding="utf-8"))[
+        "scan_to_map_icp_node"
+    ]["ros__parameters"]
+    base = effective_parameters(base)
+    assert overlay == {"pose_graph_solver": solver}
+    assert base["pose_graph_solver"] == "ceres_se3"
+    assert base["pose_graph_planar_correction_enabled"] is False
+    merged = {**base, **overlay}
+    assert merged["pose_graph_ceres_robust_scale_factors"] == [4.0, 2.0, 1.0]
+    assert merged["pose_graph_ceres_dcs_enabled"] is True
+    assert merged["pose_graph_ceres_dcs_phi"] == 5.0
+    assert {key: value for key, value in merged.items() if key != "pose_graph_solver"} == {
+        key: value for key, value in base.items() if key != "pose_graph_solver"
+    }
 
 
 def _load_launch_module():
@@ -141,6 +177,12 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["registration_only_cloud_max_point_ratio"] > 0.0
     assert params["registration_only_cloud_max_points"] >= 0
     assert params["map_voxel_leaf_m"] > 0.0
+    assert params["temporal_static_map_enabled"] is False
+    assert {
+        key for key in params if key.startswith("temporal_static_map_")
+    } == {"temporal_static_map_enabled"}
+    assert params["keyframe_archive_directory"] == ""
+    assert params["keyframe_archive_voxel_leaf_m"] == 0.22
     assert params["max_icp_iterations"] > 0
     assert params["icp_max_correspondence_m"] > 0.0
     assert params["fitness_score_threshold"] > 0.0
@@ -408,6 +450,7 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["place_recognition_registration_only_consistency_max_gap_s"] == 0.0
     assert params["place_recognition_submap_consistency_max_rotation_deg"] == 0.0
     assert params["pose_graph_correction_enabled"] is False
+    assert params["pose_graph_solver"] == "legacy_relaxation"
     assert params["pose_graph_planar_correction_enabled"] is False
     assert params["pose_graph_robust_loop_enabled"] is False
     assert params["pose_graph_distributed_loop_seed_enabled"] is False
@@ -544,7 +587,28 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["pose_graph_odom_rotation_weight"] >= 0.0
     assert params["pose_graph_loop_translation_weight"] >= 0.0
     assert params["pose_graph_loop_rotation_weight"] >= 0.0
+    assert params["pose_graph_information_mode"] == "configured_diagonal"
+    assert 0.0 < params["pose_graph_information_relative_eigen_threshold"] <= 1.0
+    assert (
+        params["pose_graph_information_relative_eigen_threshold"]
+        <= params["pose_graph_information_strong_eigenvalue_ratio"]
+        <= 1.0
+    )
+    assert 0.0 < params["pose_graph_information_weak_ratio"] <= 1.0
     assert params["pose_graph_loop_cauchy_scale"] > 0.0
+    assert params["pose_graph_ceres_max_iterations_per_stage"] > 0
+    robust_stages = params["pose_graph_ceres_robust_scale_factors"]
+    assert len(robust_stages) >= 2
+    assert all(scale > 0.0 for scale in robust_stages)
+    assert params["pose_graph_ceres_dcs_enabled"] is True
+    assert 0 <= params["pose_graph_ceres_dcs_start_stage"] < len(robust_stages)
+    assert params["pose_graph_ceres_dcs_phi"] > 0.0
+    assert 0.0 <= params["pose_graph_ceres_dcs_min_scale"] <= 1.0
+    assert params["pose_graph_ceres_function_tolerance"] >= 0.0
+    assert params["pose_graph_ceres_gradient_tolerance"] >= 0.0
+    assert params["pose_graph_ceres_parameter_tolerance"] >= 0.0
+    assert params["pose_graph_ceres_num_threads"] >= 1
+    assert params["pose_graph_ceres_use_nonmonotonic_steps"] is False
     assert params["pose_graph_min_new_loop_robust_weight"] == 0.0
     assert params["pose_graph_max_iteration_translation_step_m"] > 0.0
     assert params["pose_graph_max_iteration_rotation_step_deg"] > 0.0

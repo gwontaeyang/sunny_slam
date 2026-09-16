@@ -1,0 +1,5 @@
+hesai_pointcloud_ingest:
+  ros__parameters:
+    # Per sensor, not a combined multi-LiDAR cap. Original point validation,
+    # timestamps and rings remain enabled; record the raw topics for offline work.
+    max_output_points: 2000

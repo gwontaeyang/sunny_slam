@@ -96,8 +96,11 @@ Stage 21 Gangnam bag02·bag03 map/localization 회귀는 이 계열의
 - SE(3) pose와 keyframe;
 - overlapping submap;
 - place recognition 및 loop geometric verification;
-- robust pose graph correction;
-- shock quarantine와 terrain evidence.
+- robust pose graph correction. indoor profile은 staged Ceres SE(3), Cauchy,
+  DCS를 사용하고 outdoor profile은 별도 replay 검증 전까지 legacy backend를
+  유지한다;
+- shock quarantine와 terrain evidence;
+- temporal 미정제 global mapping cloud와 선택적 keyframe archive export.
 
 profile이 소유하는 항목:
 
@@ -107,6 +110,29 @@ profile이 소유하는 항목:
 - local-map, keyframe, submap scale;
 - loop candidate/acceptance threshold;
 - replay completeness와 품질 gate.
+
+독립 offline `slam_3d_map_cleanup`이 소유하는 항목:
+
+- temporal hit/miss, promotion/retention threshold와 Indoor first-hit floor guard;
+- 설정 파일 `slam_3d_map_cleanup/config/indoor.yaml`;
+- archive의 local sensor cloud와 corrected SE(3)를 이용한 정제 PCD 생성.
+
+`/slam_3d/map/global_cloud`는 temporal 미정제 지도다. core의
+`temporal_static_map_enabled=true`는 migration 안내와 함께 거부하고,
+`false`만 legacy guard로 허용한다. 나머지 temporal parameter는 제거한다.
+`keyframe_archive_directory: ''`는 archive 전용 scan 보존과 export를 끈다.
+보존하려면 mapping 시작 전에 경로를 설정한다. archive voxel 기본값은
+`keyframe_archive_voxel_leaf_m: 0.22`다.
+
+export는 private `~/export_keyframes` (`std_srvs/srv/Trigger`)를 사용한다.
+launch 기본 노드에서는 `/scan_to_map_icp_node/export_keyframes`이며 rename과
+namespace를 적용하면 서비스 경로도 달라진다. manifest의
+`snapshot_scope: retained_keyframes`, `pruned_keyframes`, stable monotonic ID를
+확인한다. `max_keyframes`가 보존 범위를 제한하며 삭제된 keyframe은 복원되지 않는다.
+기존 export 경로는 덮어쓰지 않으므로 재-export 전에 이전 archive를 별도 경로에
+보존해야 한다. pose-graph correction 이후에는
+새 snapshot으로 export와 offline cleanup을 다시 수행하고, projection에도 같은
+corrected state의 trajectory를 사용한다.
 
 ## 선택 위치
 

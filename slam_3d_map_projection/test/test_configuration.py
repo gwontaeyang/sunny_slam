@@ -43,3 +43,8 @@ def test_image_values_must_be_in_collision_probability_order():
 def test_integer_parameters_reject_fractional_values():
     with pytest.raises(ValueError, match="free_value must be an integer"):
         ProjectionConfig(free_value=254.5)
+
+
+def test_boolean_parameters_reject_numeric_values():
+    with pytest.raises(ValueError, match="must be a boolean"):
+        ProjectionConfig(fill_enclosed_unknown_as_free=1)

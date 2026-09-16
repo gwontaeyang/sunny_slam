@@ -21,10 +21,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.colors import ListedColormap  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 import numpy as np  # noqa: E402
+from scipy import ndimage  # noqa: E402
 
 from .outputs import point_class_colors  # noqa: E402
+from .path_planning import PathPlan  # noqa: E402
 from .projection import GridClass, ProjectionResult  # noqa: E402
 
 
@@ -90,6 +93,18 @@ def write_review_figure(
         vmin=0,
         vmax=2,
     )
+    completed_free = np.ma.masked_where(
+        ~result.enclosed_unknown_filled_mask,
+        result.enclosed_unknown_filled_mask,
+    )
+    axes[0, 1].imshow(
+        completed_free,
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+        cmap=ListedColormap(["#56B4E9"]),
+        alpha=0.25,
+    )
     _plot_trajectory(
         axes[0, 1], trajectory, result, color="#00A6D6", linewidth=1.5
     )
@@ -122,8 +137,22 @@ def write_review_figure(
         axes[0, 1].scatter(
             ramp_x, ramp_y, color="#E69F00", s=2.0, alpha=0.7, rasterized=True
         )
+    map_legend = []
+    if np.any(result.enclosed_unknown_filled_mask):
+        map_legend.append(Patch(color="#56B4E9", label="enclosed floor -> free"))
     if hazard_rows.size:
-        axes[0, 1].legend(loc="upper right")
+        map_legend.append(
+            Line2D(
+                [],
+                [],
+                color="#CC79A7",
+                marker="s",
+                linestyle="None",
+                label="terrain hazard -> unknown",
+            )
+        )
+    if map_legend:
+        axes[0, 1].legend(handles=map_legend, loc="upper right")
     axes[0, 1].set_title("Nav2 trinary grid; ramp cells in orange")
 
     slope = np.ma.masked_invalid(result.floor_slope_deg)
@@ -190,6 +219,152 @@ def write_review_figure(
     figure.suptitle(
         f"{dataset_label}: full 3D SLAM PCD to conservative 2D navigation grid"
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=170)
+    plt.close(figure)
+
+
+def write_path_review_figure(
+    path: Path,
+    dataset_label: str,
+    trajectory: np.ndarray,
+    result: ProjectionResult,
+    plan: PathPlan,
+) -> None:
+    """Render footprint-aware route connectivity and clearance evidence."""
+    geometry = result.geometry
+    extent = [
+        geometry.origin_x_m,
+        geometry.max_x_m,
+        geometry.origin_y_m,
+        geometry.max_y_m,
+    ]
+    display = np.zeros(result.occupancy.shape, dtype=np.uint8)
+    display[result.occupancy == GridClass.FREE] = 1
+    display[result.occupancy == GridClass.OCCUPIED] = 2
+    occupancy_cmap = ListedColormap(["#8A8A8A", "#FFFFFF", "#1B1B1B"])
+
+    figure, axes = plt.subplots(1, 2, figsize=(18, 9))
+    figure.subplots_adjust(
+        left=0.055,
+        right=0.965,
+        bottom=0.16,
+        top=0.90,
+        wspace=0.16,
+    )
+    axes[0].imshow(
+        display,
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+        cmap=occupancy_cmap,
+        vmin=0,
+        vmax=2,
+    )
+    ramp_overlay = np.ma.masked_where(~result.ramp_mask, result.ramp_mask)
+    axes[0].imshow(
+        ramp_overlay,
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+        cmap=ListedColormap(["#E69F00"]),
+        alpha=0.65,
+    )
+    _plot_trajectory(
+        axes[0], trajectory, result, color="#00A6D6", linewidth=0.9, alpha=0.8
+    )
+    lattice_invalid = ~plan.trajectory_lattice_valid
+    if np.any(lattice_invalid):
+        axes[0].scatter(
+            trajectory[lattice_invalid, 0],
+            trajectory[lattice_invalid, 1],
+            color="#D55E00",
+            marker="x",
+            s=13,
+            linewidths=0.7,
+            zorder=4,
+        )
+    path_xy = plan.poses_xy_yaw[:, :2]
+    axes[0].plot(path_xy[:, 0], path_xy[:, 1], color="#CC0077", linewidth=2.0)
+    axes[0].scatter(
+        [path_xy[0, 0], path_xy[-1, 0]],
+        [path_xy[0, 1], path_xy[-1, 1]],
+        c=["#009E73", "#D55E00"],
+        s=45,
+        edgecolors="black",
+        linewidths=0.5,
+        zorder=5,
+    )
+    axes[0].set_title(
+        "Nav2 grid and generated route; UNKNOWN is blocked\n"
+        f"path={plan.metrics['path_length_m']:.1f} m, "
+        f"expansions={plan.metrics['expansions']}"
+    )
+
+    blocked = result.occupancy != GridClass.FREE
+    clearance_m = (
+        ndimage.distance_transform_edt(~blocked) * geometry.resolution_m
+    )
+    free_clearance = np.ma.masked_where(blocked, clearance_m)
+    finite_clearance = clearance_m[~blocked]
+    clearance_vmax = (
+        max(1.0, float(np.percentile(finite_clearance, 95)))
+        if finite_clearance.size
+        else 1.0
+    )
+    clearance_image = axes[1].imshow(
+        free_clearance,
+        origin="lower",
+        extent=extent,
+        interpolation="nearest",
+        cmap="viridis",
+        vmin=0.0,
+        vmax=clearance_vmax,
+    )
+    axes[1].plot(path_xy[:, 0], path_xy[:, 1], color="#CC0077", linewidth=2.0)
+    axes[1].scatter(
+        [path_xy[0, 0], path_xy[-1, 0]],
+        [path_xy[0, 1], path_xy[-1, 1]],
+        c=["#009E73", "#D55E00"],
+        s=45,
+        edgecolors="black",
+        linewidths=0.5,
+        zorder=5,
+    )
+    figure.colorbar(clearance_image, ax=axes[1], label="blocked-cell clearance [m]")
+    axes[1].set_title(
+        "Footprint path clearance\n"
+        f"minimum={plan.metrics['path_minimum_blocked_cell_clearance_m']:.2f} m, "
+        f"swept collisions={plan.metrics['path_exact_swept_collision_sample_count']}"
+    )
+
+    for axis in axes:
+        axis.set_aspect("equal", adjustable="box")
+        axis.set_xlabel("map x [m]")
+        axis.set_ylabel("map y [m]")
+        axis.grid(linewidth=0.25, alpha=0.35)
+    figure.legend(
+        handles=[
+            Patch(color="#8A8A8A", label="unknown / blocked"),
+            Patch(color="#FFFFFF", ec="#777777", label="traversable floor"),
+            Patch(color="#1B1B1B", label="wall / obstacle"),
+            Patch(color="#E69F00", label="traversable ramp"),
+            Line2D([0], [0], color="#00A6D6", label="optimized trajectory"),
+            Line2D([0], [0], color="#CC0077", linewidth=2, label="planned path"),
+            Line2D(
+                [0],
+                [0],
+                color="#D55E00",
+                marker="x",
+                linestyle="none",
+                label="lattice-invalid recorded pose",
+            ),
+        ],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.015),
+        ncol=4,
+    )
+    figure.suptitle(f"{dataset_label}: floor/person-filtered 2D planning audit")
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=170)
     plt.close(figure)
