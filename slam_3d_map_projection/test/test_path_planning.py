@@ -14,6 +14,8 @@
 
 """Footprint-aware path generation tests."""
 
+from pathlib import Path
+
 import numpy as np
 
 from slam_3d_map_projection.path_planning import (
@@ -22,6 +24,7 @@ from slam_3d_map_projection.path_planning import (
     build_turn_sweep_validity,
     densify_pose_path_for_footprint,
     exact_footprint_pose_validity,
+    load_path_planning_config,
     plan_farthest_trajectory_route,
 )
 from slam_3d_map_projection.projection import GridClass, GridGeometry
@@ -49,6 +52,19 @@ def _config(**overrides):
     }
     values.update(overrides)
     return PathPlanningConfig(**values)
+
+
+def test_bundled_projection_profile_has_bounded_large_map_planner():
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "config"
+        / "indoor_grid_projection.yaml"
+    )
+    config = load_path_planning_config(config_path)
+
+    assert config.heading_bins == 8
+    assert config.translation_step_m == 0.20
+    assert config.max_expansions == 2_000_000
 
 
 def test_open_map_generates_collision_free_route():

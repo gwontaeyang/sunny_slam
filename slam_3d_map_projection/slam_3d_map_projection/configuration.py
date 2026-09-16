@@ -74,11 +74,13 @@ class ProjectionConfig:
     max_traversable_floor_roughness_m: float = 0.08
     single_level_xy_bin_m: float = 0.25
     single_level_max_z_span_m: float = 0.75
+    fill_enclosed_unknown_as_free: bool = False
     free_value: int = 254
     occupied_value: int = 0
     unknown_value: int = 205
 
     def __post_init__(self) -> None:
+        boolean_names = {"fill_enclosed_unknown_as_free"}
         integer_names = {
             "max_grid_cells",
             "floor_min_points_per_cell",
@@ -93,7 +95,10 @@ class ProjectionConfig:
         }
         for item in fields(self):
             value = getattr(self, item.name)
-            if item.name in integer_names:
+            if item.name in boolean_names:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{item.name} must be a boolean")
+            elif item.name in integer_names:
                 if isinstance(value, bool) or not isinstance(value, Integral):
                     raise ValueError(f"{item.name} must be an integer")
             elif isinstance(value, bool) or not isinstance(value, Real):

@@ -40,6 +40,8 @@ setup(
     entry_points={
         "console_scripts": [
             "pcd_to_nav_grid = slam_3d_map_projection.cli:main",
+            "refine_nav_grid_resolution = "
+            "slam_3d_map_projection.multires_cli:main",
             "raw_scans_to_nav_grid = slam_3d_map_projection.raw_cli:main",
         ],
     },

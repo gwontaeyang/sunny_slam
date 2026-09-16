@@ -24,6 +24,7 @@ public:
   using CloudT = pcl::PointCloud<PointT>;
   using Vector6d = Eigen::Matrix<double, 6, 1>;
   using RowVector6d = Eigen::Matrix<double, 1, 6>;
+  using Matrix6d = Eigen::Matrix<double, 6, 6>;
 
   struct Config
   {
@@ -77,6 +78,11 @@ public:
     double robust_downweight_ratio{0.0};
 
     int iterations{0};
+    // Robust point-to-plane Gauss-Newton Hessian for the physical increment
+    // [rx, ry, rz, tx, ty, tz] in the target frame. Unlike the eigenvalues
+    // below, this matrix is not rotation-scale normalized.
+    Matrix6d physical_hessian{Matrix6d::Zero()};
+    bool hessian_valid{false};
     // Eigenvalues are ascending and refer to the rotation-scale-normalized Hessian.
     std::array<double, 6> hessian_eigenvalues{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     int observable_rank{0};
@@ -99,6 +105,14 @@ public:
     const CloudT & source,
     const CloudT & target,
     const Eigen::Isometry3d & initial_guess) const;
+
+  // Evaluates correspondences and observability at a fixed pose without
+  // changing that pose. This lets another registration backend (for example
+  // GICP) provide point-to-plane graph information through the same model.
+  Result evaluateAtPose(
+    const CloudT & source,
+    const CloudT & target,
+    const Eigen::Isometry3d & target_T_source) const;
 
   const Config & config() const;
 

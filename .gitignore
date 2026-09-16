@@ -1,0 +1,5 @@
+# Offline cleanup is maintained and published separately.
+/slam_3d_map_cleanup/
+
+# Keep new 3D SLAM tests local; existing tracked tests remain unchanged.
+/slam_3d_*/test/

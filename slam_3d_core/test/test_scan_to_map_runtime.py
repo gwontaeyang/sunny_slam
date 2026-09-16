@@ -31,6 +31,37 @@ def _status_values(message: DiagnosticArray):
     return {item.key: item.value for item in message.status[0].values}
 
 
+def test_online_temporal_cleanup_is_rejected_with_migration_guide():
+    token = uuid.uuid4().hex[:8]
+    command = [
+        "ros2",
+        "run",
+        "slam_3d_core",
+        "scan_to_map_icp_node",
+        "--ros-args",
+        "-r",
+        f"__node:=scan_to_map_legacy_temporal_{token}",
+        "-p",
+        "temporal_static_map_enabled:=true",
+    ]
+    with tempfile.TemporaryDirectory(prefix="slam_3d_core_legacy_temporal_") as temp_dir:
+        environment = os.environ.copy()
+        environment["ROS_LOG_DIR"] = str(Path(temp_dir) / "ros_log")
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            env=environment,
+            check=False,
+        )
+
+    assert result.returncode == 1
+    output = result.stdout + result.stderr
+    assert "temporal_static_map_enabled" in output
+    assert "slam_3d_map_cleanup" in output
+
+
 def test_nonpositive_max_scan_duration_is_rejected():
     token = uuid.uuid4().hex[:8]
     command = [
@@ -62,6 +93,18 @@ def test_nonpositive_max_scan_duration_is_rejected():
     assert "deskew_max_scan_duration_s must be finite and greater than zero" in (
         result.stdout + result.stderr
     )
+
+
+def test_negative_loop_candidate_archive_limit_is_rejected(tmp_path):
+    environment = os.environ.copy()
+    environment['ROS_LOG_DIR'] = str(tmp_path / 'ros_log')
+    result = subprocess.run(
+        ['ros2', 'run', 'slam_3d_core', 'scan_to_map_icp_node', '--ros-args',
+         '-p', 'loop_candidate_archive_max_count:=-1'],
+        capture_output=True, text=True, timeout=5.0, env=environment, check=False)
+    assert result.returncode == 1
+    assert 'loop_candidate_archive_max_count must be nonnegative' in (
+        result.stdout + result.stderr)
 
 
 def test_negative_initialization_warmup_is_rejected():
@@ -418,11 +461,29 @@ def test_sparse_scan_reports_completion_and_large_imu_rewind_is_dropped():
             assert values["imu_out_of_order_dropped_count"] == "1"
             assert values["imu_rewind_dropped_count"] == "1"
             assert values["imu_timestamp_reset_count"] == "1"
+            assert values["pose_graph_solver"] == "legacy_relaxation"
+            assert values["pose_graph_information_mode"] == "configured_diagonal"
+            assert values["registration_information_valid"] == "false"
+            assert values["registration_information_status"] == "disabled"
+            assert int(values["registration_information_observable_rank"]) == 0
+            assert float(values["registration_information_evaluation_runtime_ms"]) == 0.0
             assert values["pose_graph_solver_status"] == "not_run"
             assert values["pose_graph_convergence_reason"] == "not_run"
+            assert int(values["pose_graph_solver_stages"]) == 0
+            assert int(values["pose_graph_solver_successful_steps"]) == 0
+            assert int(values["pose_graph_solver_unsuccessful_steps"]) == 0
+            assert int(values["pose_graph_dcs_downweighted_loop_edges"]) == 0
+            assert float(values["pose_graph_dcs_min_scale"]) == 1.0
+            assert float(values["pose_graph_new_loop_dcs_scale"]) == 1.0
+            assert float(values["pose_graph_solver_first_stage_initial_cost"]) == 0.0
+            assert float(values["pose_graph_solver_last_stage_final_cost"]) == 0.0
+            assert float(values["pose_graph_solver_final_gradient_max_norm"]) == 0.0
             assert float(values["pose_graph_optimization_runtime_ms"]) == 0.0
             assert float(values["pose_graph_iteration_runtime_ms"]) == 0.0
             assert float(values["pose_graph_mean_iteration_runtime_ms"]) == 0.0
+            assert int(values["pose_graph_registration_information_edges"]) == 0
+            assert int(values["pose_graph_configured_diagonal_information_edges"]) == 0
+            assert values["pose_graph_new_loop_information_status"] == "not_evaluated"
             assert (
                 values["imu_timestamp_reset_policy"]
                 == "detect_and_drop_without_partial_state_reset"
@@ -490,6 +551,8 @@ def test_offset_time_cloud_waits_for_imu_watermark_before_deskew():
         "--ros-args",
         "-r",
         f"__node:=scan_to_map_deskew_runtime_{token}",
+        "-p",
+        "temporal_static_map_enabled:=false",
         "-p",
         f"primary_cloud_topic:={cloud_topic}",
         "-p",
@@ -746,6 +809,8 @@ def test_offset_time_cloud_waits_for_imu_watermark_before_deskew():
                     skip_nans=True,
                 )
             ]
+            # Core publishes one-pass geometry; static confirmation belongs offline.
+            assert values["keyframes"] == "1"
             assert corrected_points
 
             expected_positive_yaw = (

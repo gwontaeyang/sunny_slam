@@ -157,7 +157,7 @@ def generate_launch_description():
             "registration_method",
             default_value="",
             description=(
-                "Optional registration override: gicp, icp, or voxel_surfel. "
+                "Optional override: icp, gicp, fast_gicp, ndt, or voxel_surfel. "
                 "Empty preserves params_file."
             ),
         ),

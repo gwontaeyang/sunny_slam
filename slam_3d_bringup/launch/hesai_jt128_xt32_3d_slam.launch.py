@@ -637,7 +637,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "learning_slam_registration_method",
             default_value="",
-            description="Optional override; empty preserves the selected params file",
+            description=(
+                "icp, gicp, fast_gicp, ndt, or voxel_surfel; "
+                "empty preserves the selected params file"
+            ),
         ),
         DeclareLaunchArgument(
             "learning_slam_cloud_qos_reliable",

@@ -46,6 +46,7 @@ private:
     std::atomic<std::int64_t> last_output_start_ns{0};
     std::uint64_t accepted_scan_count{0};
     std::uint64_t rejected_scan_count{0};
+    std::size_t last_output_point_count{0};
     HesaiCloudContractOptions contract_options;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher;
@@ -89,6 +90,7 @@ private:
   double max_sensor_header_to_receive_delta_s_{0.25};
   int input_depth_{10};
   int output_depth_{5};
+  std::size_t max_output_points_{0};
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr health_publisher_;
 };
 

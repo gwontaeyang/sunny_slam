@@ -1,0 +1,4 @@
+# Load after a full-3D sensor profile; preserve its robust schedule and gates.
+scan_to_map_icp_node:
+  ros__parameters:
+    pose_graph_solver: ceres_se3

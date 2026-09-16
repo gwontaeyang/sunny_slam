@@ -1,0 +1,4 @@
+# Load after a full-3D sensor profile; requires a build with GTSAM enabled.
+scan_to_map_icp_node:
+  ros__parameters:
+    pose_graph_solver: gtsam_se3

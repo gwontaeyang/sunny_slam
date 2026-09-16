@@ -290,6 +290,8 @@ TEST(VoxelSurfelRegistrationDegeneracy, SingleFloorHasRankThreeAndSuppressesXYYa
   EXPECT_GT(result.weak_translation_axes.x(), 0.95);
   EXPECT_GT(result.weak_translation_axes.y(), 0.95);
   EXPECT_LT(result.weak_translation_axes.z(), 0.05);
+  EXPECT_TRUE(result.hessian_valid);
+  EXPECT_TRUE(result.physical_hessian.isApprox(result.physical_hessian.transpose(), 1.0e-12));
 }
 
 TEST(VoxelSurfelRegistrationRecovery, ThreeOrthogonalPlanesRecoverFullRankTransform)
@@ -317,6 +319,51 @@ TEST(VoxelSurfelRegistrationRecovery, ThreeOrthogonalPlanesRecoverFullRankTransf
   EXPECT_LT(result.weak_state_vector.maxCoeff(), 0.05);
   EXPECT_GT(result.hessian_condition, 1.0);
   EXPECT_GT(result.total_time_ms, 0.0);
+  EXPECT_TRUE(result.hessian_valid);
+  EXPECT_GT(result.physical_hessian.diagonal().minCoeff(), 0.0);
+}
+
+TEST(VoxelSurfelRegistrationInformation, EvaluatesACompletedPoseWithoutMovingIt)
+{
+  const CloudT target = threeOrthogonalPlanes();
+  const Eigen::Isometry3d truth =
+    pose(0.035, -0.028, 0.048, Eigen::Vector3d(0.12, -0.09, 0.10));
+  const CloudT source = transformedToSource(target, truth);
+  const Registration registration(baseConfig());
+
+  const Registration::Result result =
+    registration.evaluateAtPose(source, target, truth);
+
+  ASSERT_TRUE(result.accepted) << result.reason;
+  EXPECT_TRUE(result.hessian_valid);
+  EXPECT_EQ(result.reason, "fixed_pose_information_valid");
+  EXPECT_EQ(result.iterations, 0);
+  EXPECT_TRUE(result.target_T_source.matrix().isApprox(truth.matrix(), 1.0e-12));
+  EXPECT_EQ(result.observable_rank, 6);
+  EXPECT_LT(result.rmse, 1.0e-5);
+  EXPECT_TRUE(result.physical_hessian.allFinite());
+}
+
+TEST(VoxelSurfelRegistrationInformation, PhysicalHessianIsInvariantToRotationScale)
+{
+  const CloudT target = threeOrthogonalPlanes();
+  const Eigen::Isometry3d truth =
+    pose(0.035, -0.028, 0.048, Eigen::Vector3d(0.12, -0.09, 0.10));
+  const CloudT source = transformedToSource(target, truth);
+  Registration::Config small_scale_config = baseConfig();
+  small_scale_config.rotation_scale = 0.25;
+  Registration::Config large_scale_config = baseConfig();
+  large_scale_config.rotation_scale = 2.0;
+
+  const Registration::Result small_scale =
+    Registration(small_scale_config).evaluateAtPose(source, target, truth);
+  const Registration::Result large_scale =
+    Registration(large_scale_config).evaluateAtPose(source, target, truth);
+
+  ASSERT_TRUE(small_scale.hessian_valid) << small_scale.reason;
+  ASSERT_TRUE(large_scale.hessian_valid) << large_scale.reason;
+  EXPECT_TRUE(
+    small_scale.physical_hessian.isApprox(large_scale.physical_hessian, 1.0e-8));
 }
 
 TEST(VoxelSurfelRegistrationDegeneracy, CorridorSuppressesLongitudinalTranslation)

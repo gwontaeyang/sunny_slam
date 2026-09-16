@@ -92,6 +92,51 @@ def test_room_floor_is_free_and_walls_are_occupied():
     assert result.metrics["trajectory"]["occupied_cells_after_clear"] == 0
 
 
+def test_enclosed_unknown_floor_hole_can_be_completed_without_opening_exterior():
+    points, trajectory = _synthetic_room()
+    side_walls = np.asarray(
+        [
+            (x_value, y_value, height)
+            for x_value in (-2.0, 2.0)
+            for y_value in np.arange(-1.0, 1.01, 0.1)
+            for height in (0.3, 0.8, 1.4)
+        ],
+        dtype=np.float64,
+    )
+    points = np.vstack([points, side_walls])
+    trajectory = trajectory[np.abs(trajectory[:, 0]) <= 1.5]
+    floor_hole = (
+        np.isclose(points[:, 2], 0.0)
+        & (np.abs(points[:, 0]) <= 0.35)
+        & (points[:, 1] >= 0.35)
+        & (points[:, 1] <= 0.85)
+    )
+    points = points[~floor_hole]
+
+    conservative = project_map(
+        points,
+        trajectory,
+        _config(obstacle_closing_radius_m=0.15),
+    )
+    completed = project_map(
+        points,
+        trajectory,
+        _config(
+            obstacle_closing_radius_m=0.15,
+            fill_enclosed_unknown_as_free=True,
+        ),
+    )
+
+    hole = _cell(completed, 0.0, 0.60)
+    exterior = _cell(completed, 0.0, 1.25)
+    assert conservative.occupancy[hole] == GridClass.UNKNOWN
+    assert completed.occupancy[hole] == GridClass.FREE
+    assert completed.enclosed_unknown_filled_mask[hole]
+    assert completed.occupancy[exterior] == GridClass.UNKNOWN
+    assert not completed.enclosed_unknown_filled_mask[exterior]
+    assert completed.metrics["interior_free_completion"]["filled_cells"] > 0
+
+
 def test_ramp_remains_free_and_is_labeled_separately():
     points, trajectory = _synthetic_room(with_ramp=True)
     result = project_map(points, trajectory, _config())
@@ -331,6 +376,7 @@ def test_supported_below_floor_returns_make_untraversed_cell_unknown():
         _config(
             robot_footprint_width_m=0.2,
             below_floor_min_support_points=2,
+            fill_enclosed_unknown_as_free=True,
         ),
     )
 
@@ -338,6 +384,7 @@ def test_supported_below_floor_returns_make_untraversed_cell_unknown():
     assert result.below_floor_endpoint_mask[cell]
     assert result.terrain_hazard_mask[cell]
     assert result.occupancy[cell] == GridClass.UNKNOWN
+    assert not result.enclosed_unknown_filled_mask[cell]
 
 
 def test_excessive_slope_is_unknown_outside_driven_footprint():
