@@ -156,7 +156,7 @@ def launch_slam(context):
                 "use_lifecycle_manager": use_lifecycle_manager,
             },
         ],
-    )
+    )]
 
     configure_event = EmitEvent(
         event=ChangeState(
