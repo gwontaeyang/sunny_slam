@@ -21,9 +21,13 @@ from typing import Optional, Sequence
 
 from .configuration import load_projection_config
 from .outputs import write_projection_outputs
+from .path_planning import (
+    load_path_planning_config,
+    plan_farthest_trajectory_route,
+)
 from .pcd_io import read_binary_pcd_records, read_pcd_xyz
 from .projection import project_map
-from .review import write_review_figure
+from .review import write_path_review_figure, write_review_figure
 from .support_projection import (
     project_support_evidence,
     write_support_grid_outputs,
@@ -39,9 +43,20 @@ def _parser() -> argparse.ArgumentParser:
             "map while retaining ramp and terrain evidence."
         )
     )
-    parser.add_argument("--pcd", required=True, type=Path, help="Full localization PCD")
     parser.add_argument(
-        "--trajectory", required=True, type=Path, help="Post-optimization trajectory CSV"
+        "--pcd",
+        required=True,
+        type=Path,
+        help=(
+            "Map-frame PCD; use slam_3d_map_cleanup map_static.pcd for the "
+            "cleaned-map workflow, not the uncleaned core global_cloud"
+        ),
+    )
+    parser.add_argument(
+        "--trajectory",
+        required=True,
+        type=Path,
+        help="Post-optimization trajectory CSV from the same corrected state as the PCD",
     )
     parser.add_argument("--config", required=True, type=Path, help="Projection YAML")
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -55,6 +70,23 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--support-evidence-radius-m", type=float, default=0.10)
     parser.add_argument("--probable-support-min-cost", type=float, default=0.35)
+    parser.add_argument(
+        "--plan-path",
+        action="store_true",
+        help=(
+            "Generate a footprint-aware route between the farthest connected "
+            "trajectory poses"
+        ),
+    )
+    parser.add_argument(
+        "--path-config",
+        type=Path,
+        default=None,
+        help=(
+            "YAML containing path_planning parameters; defaults to --config "
+            "when --plan-path is set"
+        ),
+    )
     parser.add_argument("--no-review", action="store_true")
     return parser
 
@@ -70,6 +102,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         and not args.support_evidence_pcd.is_file()
     ):
         raise FileNotFoundError(args.support_evidence_pcd)
+    if args.path_config is not None and not args.plan_path:
+        raise ValueError("--path-config requires --plan-path")
+    path_config_path = args.path_config or args.config
+    if args.plan_path and not path_config_path.is_file():
+        raise FileNotFoundError(path_config_path)
     if not args.map_name or any(character.isspace() for character in args.map_name):
         raise ValueError("map-name must be a non-empty token without whitespace")
 
@@ -84,6 +121,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         trajectory_stamp_ns=trajectory_data.stamp_ns,
         trajectory_yaw_source=trajectory_data.yaw_source,
     )
+    path_planning_config = None
+    path_plan = None
+    if args.plan_path:
+        path_planning_config = load_path_planning_config(path_config_path)
+        path_plan = plan_farthest_trajectory_route(
+            result.occupancy,
+            result.geometry,
+            trajectory,
+            result.trajectory_yaw_rad,
+            path_planning_config,
+        )
     outputs = write_projection_outputs(
         args.output_dir,
         args.map_name,
@@ -91,6 +139,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         trajectory,
         result,
         config,
+        path_plan=path_plan,
+        path_planning_config=path_planning_config,
     )
     support_metrics = None
     if args.support_evidence_pcd is not None:
@@ -124,10 +174,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             result,
         )
         outputs["review"] = review_path
+        if path_plan is not None:
+            path_review_path = args.output_dir / f"{args.map_name}_path_review.png"
+            write_path_review_figure(
+                path_review_path,
+                args.dataset_label or args.map_name,
+                trajectory,
+                result,
+                path_plan,
+            )
+            outputs["path_review"] = path_review_path
     print(
         json.dumps(
             {
                 "metrics": result.metrics,
+                "path_planning": (
+                    path_plan.metrics if path_plan is not None else None
+                ),
                 "support_metrics": support_metrics,
                 "outputs": {name: str(path) for name, path in outputs.items()},
             },

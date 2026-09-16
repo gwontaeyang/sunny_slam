@@ -1,0 +1,37 @@
+scan_to_map_icp_node:
+  ros__parameters:
+    # Load AFTER the calibrated sensor profile. Pair with ingest's point budget.
+    # Compute-first candidate: map detail and terrain semantics are sacrificed.
+    cloud_processing_period_s: 0.05
+    registration_method: voxel_surfel
+    max_range_m: 22.0
+    scan_voxel_leaf_m: 0.40
+    map_voxel_leaf_m: 0.35
+    min_scan_points: 200
+    surfel_voxel_size_m: 0.85
+    surfel_min_points_per_voxel: 4
+    surfel_min_correspondences: 80
+    surfel_max_iterations: 5
+    surfel_max_backtracking_steps: 2
+    surfel_rotation_convergence_rad: 0.002
+    surfel_translation_convergence_m: 0.003
+    surfel_relative_cost_convergence: 0.001
+    local_map_radius_m: 10.0
+    max_local_keyframes: 16
+    max_local_submaps: 2
+    keyframe_translation_m: 0.75
+    keyframe_rotation_deg: 12.0
+    keyframe_rotation_3d_deg: 12.0
+    submap_max_keyframes: 16
+    submap_overlap_keyframes: 3
+    place_recognition_periodic_min_interval_s: 5.0
+    place_recognition_max_candidates: 2
+    place_recognition_candidate_map_neighbors: 3
+    # Keep the historical exclusion gate at its baseline to avoid false loops.
+    pose_graph_ceres_max_iterations_per_stage: 8
+    pose_graph_ceres_robust_scale_factors: [2.0, 1.0]
+    pose_graph_ceres_num_threads: 1
+    terrain_evidence_enabled: false
+    terrain_roughness_preview_enabled: false
+    terrain_traversal_confirmation_enabled: false
+    map_publish_period_s: 5.0

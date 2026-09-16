@@ -501,6 +501,13 @@ Vector6d physicalStep(const LinearSystem & system, double rotation_scale)
   return result;
 }
 
+Matrix6d physicalHessian(const LinearSystem & system, double rotation_scale)
+{
+  Matrix6d normalized_from_physical = Matrix6d::Identity();
+  normalized_from_physical.diagonal().template head<3>().setConstant(rotation_scale);
+  return normalized_from_physical * system.hessian * normalized_from_physical;
+}
+
 Vector6d clampStep(
   const Vector6d & step,
   const VoxelSurfelRegistration::Config & config)
@@ -569,6 +576,16 @@ void updateResultDiagnostics(
   result.weak_state_vector = linear_system->weak_state;
   result.weak_rotation_axes = linear_system->weak_state.template head<3>();
   result.weak_translation_axes = linear_system->weak_state.template tail<3>();
+  result.physical_hessian = physicalHessian(*linear_system, config.rotation_scale);
+  result.physical_hessian =
+    0.5 * (result.physical_hessian + result.physical_hessian.transpose());
+  result.hessian_valid = linear_system->valid &&
+    result.correspondences >= config.min_correspondences &&
+    result.correspondence_ratio >= config.min_correspondence_ratio &&
+    std::isfinite(result.rmse) && result.rmse <= config.max_quality_rmse &&
+    std::isfinite(result.p95_abs_residual) &&
+    result.p95_abs_residual <= config.max_quality_p95 &&
+    result.physical_hessian.allFinite();
 }
 
 }  // namespace
@@ -625,6 +642,87 @@ VoxelSurfelRegistration::RowVector6d VoxelSurfelRegistration::pointToPlaneJacobi
     target_normal.transpose() * (-skew(rotated_source));
   jacobian.template tail<3>() = target_normal.transpose();
   return jacobian;
+}
+
+VoxelSurfelRegistration::Result VoxelSurfelRegistration::evaluateAtPose(
+  const CloudT & source,
+  const CloudT & target,
+  const Eigen::Isometry3d & target_T_source) const
+{
+  const Clock::time_point total_start = Clock::now();
+  Result result;
+  result.target_T_source = target_T_source;
+
+  if (!validConfig(config_)) {
+    result.reason = "invalid_config";
+    result.total_time_ms = elapsedMilliseconds(total_start, Clock::now());
+    return result;
+  }
+  if (!isFinite(target_T_source)) {
+    result.reason = "invalid_fixed_pose";
+    result.total_time_ms = elapsedMilliseconds(total_start, Clock::now());
+    return result;
+  }
+
+  const Clock::time_point target_build_start = Clock::now();
+  const TargetModel target_model = buildTargetModel(target, config_);
+  const Clock::time_point target_build_end = Clock::now();
+  result.target_voxels = target_model.voxel_count;
+  result.planar_surfels = target_model.surfels.size();
+  result.target_build_time_ms =
+    elapsedMilliseconds(target_build_start, target_build_end);
+  if (source.empty()) {
+    result.reason = "empty_source";
+    result.total_time_ms = elapsedMilliseconds(total_start, Clock::now());
+    return result;
+  }
+  if (target_model.voxel_count == 0U) {
+    result.reason = "empty_target";
+    result.total_time_ms = elapsedMilliseconds(total_start, Clock::now());
+    return result;
+  }
+  if (target_model.surfels.empty()) {
+    result.reason = "no_planar_surfels";
+    result.total_time_ms = elapsedMilliseconds(total_start, Clock::now());
+    return result;
+  }
+
+  const Clock::time_point evaluation_start = Clock::now();
+  const CorrespondenceSet correspondences =
+    findCorrespondences(source, target_model.surfels, target_T_source, config_);
+  std::optional<LinearSystem> system;
+  if (!correspondences.values.empty()) {
+    system = buildLinearSystem(correspondences.values, config_);
+  }
+  updateResultDiagnostics(
+    result,
+    correspondences,
+    config_,
+    system.has_value() ? &(*system) : nullptr);
+  result.optimization_time_ms =
+    elapsedMilliseconds(evaluation_start, Clock::now());
+  result.converged = true;
+  result.accepted = result.hessian_valid;
+
+  if (result.valid_source_points == 0U) {
+    result.reason = "empty_source";
+  } else if (result.correspondences < config_.min_correspondences) {
+    result.reason = "insufficient_correspondences";
+  } else if (result.correspondence_ratio < config_.min_correspondence_ratio) {
+    result.reason = "insufficient_correspondence_ratio";
+  } else if (!system.has_value() || !system->valid) {
+    result.reason = "numerical_failure";
+  } else if (!std::isfinite(result.rmse) || result.rmse > config_.max_quality_rmse) {
+    result.reason = "quality_rmse";
+  } else if (!std::isfinite(result.p95_abs_residual) ||
+    result.p95_abs_residual > config_.max_quality_p95)
+  {
+    result.reason = "quality_p95";
+  } else {
+    result.reason = "fixed_pose_information_valid";
+  }
+  result.total_time_ms = elapsedMilliseconds(total_start, Clock::now());
+  return result;
 }
 
 VoxelSurfelRegistration::Result VoxelSurfelRegistration::align(

@@ -16,10 +16,15 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>yaml-cpp</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>visualization_msgs</depend>
   <depend>libpcl-all-dev</depend>
+  <depend>libceres-dev</depend>
+  <!-- g2o and GTSAM are optional CMake dependencies; see README Pose Graph Backend. -->
+  <!-- fast_gicp is optional; enable explicitly with SLAM_3D_WITH_FAST_GICP=ON. -->
   <depend>eigen</depend>
 
   <exec_depend>ament_index_python</exec_depend>
@@ -34,6 +39,8 @@
   <test_depend>builtin_interfaces</test_depend>
   <test_depend>python3-yaml</test_depend>
   <test_depend>rclpy</test_depend>
+  <test_depend>ros2param</test_depend>
+  <test_depend>ros2run</test_depend>
   <test_depend>sensor_msgs_py</test_depend>
 
   <export>

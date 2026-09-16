@@ -1,0 +1,38 @@
+scan_to_map_icp_node:
+  ros__parameters:
+    # Load after the calibrated sensor profile; pair with ingest's 2k budget.
+    # CPU takes priority over map detail and pose stability. Retain the raw bag.
+    # This overlay does not select a pose-graph solver or alter sensor frames.
+    cloud_processing_period_s: 0.05
+    registration_method: voxel_surfel
+    max_range_m: 15.0
+    scan_voxel_leaf_m: 0.60
+    map_voxel_leaf_m: 0.50
+    min_scan_points: 100
+    surfel_voxel_size_m: 1.0
+    surfel_min_points_per_voxel: 3
+    surfel_min_correspondences: 30
+    surfel_max_iterations: 3
+    surfel_max_backtracking_steps: 1
+    surfel_rotation_convergence_rad: 0.004
+    surfel_translation_convergence_m: 0.006
+    surfel_relative_cost_convergence: 0.002
+    local_map_radius_m: 8.0
+    max_local_keyframes: 8
+    max_local_submaps: 1
+    keyframe_translation_m: 1.0
+    keyframe_rotation_deg: 18.0
+    keyframe_rotation_3d_deg: 18.0
+    submap_max_keyframes: 12
+    submap_overlap_keyframes: 2
+    place_recognition_periodic_min_interval_s: 8.0
+    place_recognition_max_candidates: 1
+    place_recognition_candidate_map_neighbors: 2
+    # Shared schedule applies to Ceres, g2o and GTSAM despite legacy names.
+    pose_graph_ceres_max_iterations_per_stage: 4
+    pose_graph_ceres_robust_scale_factors: [1.0]
+    pose_graph_ceres_num_threads: 1
+    terrain_evidence_enabled: false
+    terrain_roughness_preview_enabled: false
+    terrain_traversal_confirmation_enabled: false
+    map_publish_period_s: 10.0

@@ -1,4 +1,5 @@
 #include "slam_3d_core/scan_to_map_icp.hpp"
+#include "parameter_profile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -17,9 +19,6 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/common/transforms.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <pcl/registration/correspondence_rejection_trimmed.h>
-#include <pcl/registration/gicp.h>
-#include <pcl/registration/icp.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <tf2/exceptions.h>
 
@@ -30,6 +29,7 @@
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "sensor_msgs/msg/point_field.hpp"
 #include "slam_3d_core/registration_policy.hpp"
+#include "slam_3d_core/loop_candidate_archive.hpp"
 #include "slam_3d_core/rigid_transform.hpp"
 #include "slam_3d_core/scan_context_descriptor.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
@@ -470,1080 +470,1158 @@ ScanToMapIcp::ScanToMapIcp(const rclcpp::NodeOptions & options)
 
 void ScanToMapIcp::setupParameters()
 {
-  map_frame_ = declare_parameter<std::string>("map_frame", "map");
-  odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
-  base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
+  ParameterProfile parameters(*this);
+  map_frame_ = parameters.declare<std::string>("map_frame", "map");
+  odom_frame_ = parameters.declare<std::string>("odom_frame", "odom");
+  base_frame_ = parameters.declare<std::string>("base_frame", "base_link");
 
-  primary_cloud_topic_ = declare_parameter<std::string>(
+  primary_cloud_topic_ = parameters.declare<std::string>(
     "primary_cloud_topic",
     "/slam_3d/input/hesai_center/points_timed");
   auxiliary_cloud_inputs_[0].name = "secondary";
-  auxiliary_cloud_inputs_[0].topic = declare_parameter<std::string>(
+  auxiliary_cloud_inputs_[0].topic = parameters.declare<std::string>(
     "secondary_cloud_topic",
     "/slam_3d/input/hesai_front/points_timed");
   auxiliary_cloud_inputs_[1].name = "tertiary";
-  auxiliary_cloud_inputs_[1].topic = declare_parameter<std::string>(
+  auxiliary_cloud_inputs_[1].topic = parameters.declare<std::string>(
     "tertiary_cloud_topic",
     "/slam_3d/input/hesai_rear/points_timed");
-  wheel_odom_topic_ = declare_parameter<std::string>("wheel_odom_topic", "/motor_driver_node/odom");
-  imu_topic_ = declare_parameter<std::string>("imu_topic", "/imu/data");
-  wheel_odom_expected_frame_ = declare_parameter<std::string>(
+  wheel_odom_topic_ =
+    parameters.declare<std::string>("wheel_odom_topic", "/motor_driver_node/odom");
+  imu_topic_ = parameters.declare<std::string>("imu_topic", "/imu/data");
+  wheel_odom_expected_frame_ = parameters.declare<std::string>(
     "wheel_odom_expected_frame",
     odom_frame_);
-  wheel_odom_expected_child_frame_ = declare_parameter<std::string>(
+  wheel_odom_expected_child_frame_ = parameters.declare<std::string>(
     "wheel_odom_expected_child_frame",
     base_frame_);
-  imu_expected_frame_ = declare_parameter<std::string>(
+  imu_expected_frame_ = parameters.declare<std::string>(
     "imu_expected_frame",
     "");
 
-  odom_topic_ = declare_parameter<std::string>("odom_topic", "/slam_3d/frontend/odom");
-  path_topic_ = declare_parameter<std::string>("path_topic", "/slam_3d/frontend/path");
-  local_map_topic_ = declare_parameter<std::string>(
+  odom_topic_ = parameters.declare<std::string>("odom_topic", "/slam_3d/frontend/odom");
+  path_topic_ = parameters.declare<std::string>("path_topic", "/slam_3d/frontend/path");
+  local_map_topic_ = parameters.declare<std::string>(
     "local_map_topic",
     "/slam_3d/map/active_submap");
-  global_map_topic_ = declare_parameter<std::string>(
+  global_map_topic_ = parameters.declare<std::string>(
     "global_map_topic",
     "/slam_3d/map/global_cloud");
-  terrain_evidence_topic_ = declare_parameter<std::string>(
+  keyframe_archive_directory_ = parameters.declare<std::string>(
+    "keyframe_archive_directory", "");
+  loop_candidate_archive_directory_ = parameters.declare<std::string>(
+    "loop_candidate_archive_directory", "");
+  loop_candidate_archive_max_count_ = parameters.declare<int>(
+    "loop_candidate_archive_max_count", 32);
+  if (loop_candidate_archive_max_count_ < 0) {
+    throw std::invalid_argument("loop_candidate_archive_max_count must be nonnegative");
+  }
+  keyframe_archive_voxel_leaf_m_ = parameters.declare<double>(
+    "keyframe_archive_voxel_leaf_m", 0.22);
+  if (!std::isfinite(keyframe_archive_voxel_leaf_m_) || keyframe_archive_voxel_leaf_m_ <= 0.0) {
+    throw std::invalid_argument("keyframe_archive_voxel_leaf_m must be finite and positive");
+  }
+  terrain_evidence_topic_ = parameters.declare<std::string>(
     "terrain_evidence_topic",
     "/slam_3d/terrain/evidence");
-  terrain_evidence_colored_topic_ = declare_parameter<std::string>(
+  terrain_evidence_colored_topic_ = parameters.declare<std::string>(
     "terrain_evidence_colored_topic",
     "/slam_3d/terrain/evidence_colored");
-  terrain_support_topic_ = declare_parameter<std::string>(
+  terrain_support_topic_ = parameters.declare<std::string>(
     "terrain_support_evidence_topic",
     "/slam_3d/terrain/support_evidence");
-  terrain_preview_evidence_topic_ = declare_parameter<std::string>(
+  terrain_preview_evidence_topic_ = parameters.declare<std::string>(
     "terrain_preview_evidence_topic",
     "/slam_3d/terrain/preview_evidence");
-  pose_graph_marker_topic_ = declare_parameter<std::string>(
+  pose_graph_marker_topic_ = parameters.declare<std::string>(
     "pose_graph_marker_topic",
     "/slam_3d/backend/pose_graph_markers");
-  health_topic_ = declare_parameter<std::string>("health_topic", "/slam_3d/health");
-  imu_watermark_topic_ = declare_parameter<std::string>(
+  health_topic_ = parameters.declare<std::string>("health_topic", "/slam_3d/health");
+  imu_watermark_topic_ = parameters.declare<std::string>(
     "imu_watermark_topic",
     "/slam_3d/imu_watermark_ns");
-  preprocessed_scan_topic_ = declare_parameter<std::string>(
+  preprocessed_scan_topic_ = parameters.declare<std::string>(
     "preprocessed_scan_topic",
     "/slam_3d/frontend/deskewed_points");
 
-  registration_method_ = declare_parameter<std::string>("registration_method", "gicp");
-  mapping_spatial_mode_ = declare_parameter<std::string>("mapping_spatial_mode", "planar");
+  registration_method_ = parameters.declare<std::string>("registration_method", "gicp");
+  registration_backend_options_.fast_gicp_num_threads =
+    parameters.declare<int>("fast_gicp_num_threads", 1);
+  registration_backend_options_.ndt_resolution_m =
+    parameters.declare<double>("ndt_resolution_m", 1.0);
+  registration_backend_options_.ndt_step_size =
+    parameters.declare<double>("ndt_step_size", 0.1);
+  registration_backend_options_.ndt_transformation_epsilon =
+    parameters.declare<double>("ndt_transformation_epsilon", 0.01);
+  mapping_spatial_mode_ = parameters.declare<std::string>("mapping_spatial_mode", "planar");
   auxiliary_cloud_inputs_[0].enabled =
-    declare_parameter<bool>("use_secondary_cloud", false);
+    parameters.declare<bool>("use_secondary_cloud", false);
   auxiliary_cloud_inputs_[1].enabled =
-    declare_parameter<bool>("use_tertiary_cloud", false);
+    parameters.declare<bool>("use_tertiary_cloud", false);
   auxiliary_cloud_inputs_[0].registration_only =
-    declare_parameter<bool>("secondary_cloud_registration_only", false);
+    parameters.declare<bool>("secondary_cloud_registration_only", false);
   auxiliary_cloud_inputs_[1].registration_only =
-    declare_parameter<bool>("tertiary_cloud_registration_only", false);
-  cloud_subscription_reliable_ = declare_parameter<bool>(
+    parameters.declare<bool>("tertiary_cloud_registration_only", false);
+  cloud_subscription_reliable_ = parameters.declare<bool>(
     "cloud_subscription_reliable",
     false);
-  imu_subscription_reliable_ = declare_parameter<bool>(
+  imu_subscription_reliable_ = parameters.declare<bool>(
     "imu_subscription_reliable",
     false);
-  use_tf_transforms_ = declare_parameter<bool>("use_tf_transforms", true);
-  reject_cloud_on_tf_failure_ = declare_parameter<bool>(
+  use_tf_transforms_ = parameters.declare<bool>("use_tf_transforms", true);
+  reject_cloud_on_tf_failure_ = parameters.declare<bool>(
     "reject_cloud_on_tf_failure",
     true);
-  reject_cloud_on_deskew_failure_ = declare_parameter<bool>(
+  reject_cloud_on_deskew_failure_ = parameters.declare<bool>(
     "reject_cloud_on_deskew_failure",
     false);
-  use_wheel_prediction_ = declare_parameter<bool>("use_wheel_prediction", true);
-  wheel_odom_require_expected_frames_ = declare_parameter<bool>(
+  use_wheel_prediction_ = parameters.declare<bool>("use_wheel_prediction", true);
+  wheel_odom_require_expected_frames_ = parameters.declare<bool>(
     "wheel_odom_require_expected_frames",
     true);
-  imu_require_expected_frame_ = declare_parameter<bool>(
+  imu_require_expected_frame_ = parameters.declare<bool>(
     "imu_require_expected_frame",
     false);
-  use_constant_velocity_prediction_ = declare_parameter<bool>(
+  use_constant_velocity_prediction_ = parameters.declare<bool>(
     "use_constant_velocity_prediction",
     true);
-  use_scan_to_scan_prediction_ = declare_parameter<bool>("use_scan_to_scan_prediction", false);
-  use_scan_to_scan_fallback_ = declare_parameter<bool>("use_scan_to_scan_fallback", false);
-  add_scan_to_scan_fallback_keyframes_ = declare_parameter<bool>(
+  use_scan_to_scan_prediction_ = parameters.declare<bool>("use_scan_to_scan_prediction", false);
+  use_scan_to_scan_fallback_ = parameters.declare<bool>("use_scan_to_scan_fallback", false);
+  add_scan_to_scan_fallback_keyframes_ = parameters.declare<bool>(
     "add_scan_to_scan_fallback_keyframes",
     false);
-  use_motion_prior_fallback_ = declare_parameter<bool>("use_motion_prior_fallback", false);
-  add_motion_prior_fallback_keyframes_ = declare_parameter<bool>(
+  use_motion_prior_fallback_ = parameters.declare<bool>("use_motion_prior_fallback", false);
+  add_motion_prior_fallback_keyframes_ = parameters.declare<bool>(
     "add_motion_prior_fallback_keyframes",
     false);
-  adaptive_scan_voxel_enabled_ = declare_parameter<bool>("adaptive_scan_voxel_enabled", false);
-  quarantine_keyframes_on_shock_ = declare_parameter<bool>(
+  adaptive_scan_voxel_enabled_ = parameters.declare<bool>("adaptive_scan_voxel_enabled", false);
+  quarantine_keyframes_on_shock_ = parameters.declare<bool>(
     "quarantine_keyframes_on_shock",
     false);
-  quarantine_pose_on_shock_ = declare_parameter<bool>("quarantine_pose_on_shock", false);
-  record_tracking_scan_on_pose_quarantine_ = declare_parameter<bool>(
+  quarantine_pose_on_shock_ = parameters.declare<bool>("quarantine_pose_on_shock", false);
+  record_tracking_scan_on_pose_quarantine_ = parameters.declare<bool>(
     "record_tracking_scan_on_pose_quarantine",
     false);
-  record_tracking_scan_during_shock_ = declare_parameter<bool>(
+  record_tracking_scan_during_shock_ = parameters.declare<bool>(
     "record_tracking_scan_during_shock",
     false);
-  place_recognition_enabled_ = declare_parameter<bool>("place_recognition_enabled", false);
-  place_recognition_periodic_enabled_ = declare_parameter<bool>(
+  place_recognition_enabled_ = parameters.declare<bool>("place_recognition_enabled", false);
+  place_recognition_periodic_enabled_ = parameters.declare<bool>(
     "place_recognition_periodic_enabled",
     false);
-  place_recognition_require_pose_graph_correction_ = declare_parameter<bool>(
+  place_recognition_require_pose_graph_correction_ = parameters.declare<bool>(
     "place_recognition_require_pose_graph_correction",
     false);
-  place_recognition_mapping_cloud_refinement_enabled_ = declare_parameter<bool>(
+  place_recognition_mapping_cloud_refinement_enabled_ = parameters.declare<bool>(
     "place_recognition_mapping_cloud_refinement_enabled",
     false);
   place_recognition_mapping_refinement_required_for_pose_graph_ =
-    declare_parameter<bool>(
+    parameters.declare<bool>(
     "place_recognition_mapping_refinement_required_for_pose_graph",
     false);
-  place_recognition_mapping_refinement_large_pose_jump_enabled_ = declare_parameter<bool>(
+  place_recognition_mapping_refinement_large_pose_jump_enabled_ = parameters.declare<bool>(
     "place_recognition_mapping_refinement_large_pose_jump_enabled",
     false);
   place_recognition_mapping_refinement_large_pose_jump_verified_coarse_enabled_ =
-    declare_parameter<bool>(
+    parameters.declare<bool>(
     "place_recognition_mapping_refinement_large_pose_jump_verified_coarse_enabled",
     false);
   mapping_cloud_refinement_config_.enabled =
     place_recognition_mapping_cloud_refinement_enabled_;
   mapping_cloud_verified_coarse_config_.enabled =
     place_recognition_mapping_refinement_large_pose_jump_verified_coarse_enabled_;
-  pose_graph_correction_enabled_ = declare_parameter<bool>(
+  pose_graph_correction_enabled_ = parameters.declare<bool>(
     "pose_graph_correction_enabled",
     false);
-  pose_graph_planar_correction_enabled_ = declare_parameter<bool>(
+  pose_graph_solver_ = parameters.declare<std::string>(
+    "pose_graph_solver",
+    "legacy_relaxation");
+  pose_graph_information_mode_ = parameters.declare<std::string>(
+    "pose_graph_information_mode",
+    "configured_diagonal");
+  pose_graph_planar_correction_enabled_ = parameters.declare<bool>(
     "pose_graph_planar_correction_enabled",
     false);
-  pose_graph_robust_loop_enabled_ = declare_parameter<bool>(
+  pose_graph_robust_loop_enabled_ = parameters.declare<bool>(
     "pose_graph_robust_loop_enabled",
     false);
-  pose_graph_distributed_loop_seed_enabled_ = declare_parameter<bool>(
+  pose_graph_distributed_loop_seed_enabled_ = parameters.declare<bool>(
     "pose_graph_distributed_loop_seed_enabled",
     false);
-  pose_graph_minimum_interval_override_config_.enabled = declare_parameter<bool>(
+  pose_graph_minimum_interval_override_config_.enabled = parameters.declare<bool>(
     "pose_graph_minimum_interval_override_enabled",
     false);
-  pose_graph_duplicate_submap_pair_override_config_.enabled = declare_parameter<bool>(
+  pose_graph_duplicate_submap_pair_override_config_.enabled = parameters.declare<bool>(
     "pose_graph_duplicate_submap_pair_override_enabled",
     false);
-  pose_graph_duplicate_submap_pair_override_config_.max_edges = declare_parameter<int>(
+  pose_graph_duplicate_submap_pair_override_config_.max_edges = parameters.declare<int>(
     "pose_graph_duplicate_submap_pair_override_max_edges",
     1);
-  pose_graph_minimum_interval_override_single_floor_z_enabled_ = declare_parameter<bool>(
+  pose_graph_minimum_interval_override_single_floor_z_enabled_ = parameters.declare<bool>(
     "pose_graph_minimum_interval_override_single_floor_z_enabled",
     false);
-  planar_pose_constraint_enabled_ = declare_parameter<bool>(
+  planar_pose_constraint_enabled_ = parameters.declare<bool>(
     "planar_pose_constraint_enabled",
     false);
-  ground_motion_constraint_config_.enabled = declare_parameter<bool>(
+  ground_motion_constraint_config_.enabled = parameters.declare<bool>(
     "ground_vehicle_motion_constraint_enabled",
     false);
-  gravity_roll_pitch_constraint_enabled_ = declare_parameter<bool>(
+  gravity_roll_pitch_constraint_enabled_ = parameters.declare<bool>(
     "gravity_roll_pitch_constraint_enabled",
     false);
-  imu_relative_roll_pitch_constraint_enabled_ = declare_parameter<bool>(
+  imu_relative_roll_pitch_constraint_enabled_ = parameters.declare<bool>(
     "imu_relative_roll_pitch_constraint_enabled",
     false);
   imu_relative_attitude_constraint_config_.enabled =
     imu_relative_roll_pitch_constraint_enabled_;
-  map_z_filter_enabled_ = declare_parameter<bool>(
+  map_z_filter_enabled_ = parameters.declare<bool>(
     "map_z_filter_enabled",
     false);
-  deskew_enabled_ = declare_parameter<bool>("deskew_enabled", false);
-  deskew_wait_for_imu_watermark_ = declare_parameter<bool>(
+  deskew_enabled_ = parameters.declare<bool>("deskew_enabled", false);
+  deskew_wait_for_imu_watermark_ = parameters.declare<bool>(
     "deskew_wait_for_imu_watermark",
     false);
-  inter_lidar_motion_compensation_enabled_ = declare_parameter<bool>(
+  inter_lidar_motion_compensation_enabled_ = parameters.declare<bool>(
     "inter_lidar_motion_compensation_enabled",
     false);
-  inter_lidar_gap_recovery_hypothesis_enabled_ = declare_parameter<bool>(
+  inter_lidar_gap_recovery_hypothesis_enabled_ = parameters.declare<bool>(
     "inter_lidar_gap_recovery_hypothesis_enabled",
     false);
-  inter_lidar_motion_compensation_source_ = declare_parameter<std::string>(
+  inter_lidar_motion_compensation_source_ = parameters.declare<std::string>(
     "inter_lidar_motion_compensation_source",
     "wheel_odom");
-  inter_lidar_motion_failure_policy_ = declare_parameter<std::string>(
+  inter_lidar_motion_failure_policy_ = parameters.declare<std::string>(
     "inter_lidar_motion_failure_policy",
     "drop_auxiliary");
-  imu_rotation_prediction_enabled_ = declare_parameter<bool>(
+  imu_rotation_prediction_enabled_ = parameters.declare<bool>(
     "imu_rotation_prediction_enabled",
     false);
-  imu_rotation_prediction_source_ = declare_parameter<std::string>(
+  imu_rotation_prediction_source_ = parameters.declare<std::string>(
     "imu_rotation_prediction_source",
     "angular_velocity");
-  imu_roughness_detection_enabled_ = declare_parameter<bool>(
+  imu_roughness_detection_enabled_ = parameters.declare<bool>(
     "imu_roughness_detection_enabled",
     false);
-  imu_shock_policy_enabled_ = declare_parameter<bool>(
+  imu_shock_policy_enabled_ = parameters.declare<bool>(
     "imu_shock_policy_enabled",
     false);
-  robust_registration_enabled_ = declare_parameter<bool>(
+  robust_registration_enabled_ = parameters.declare<bool>(
     "robust_registration_enabled",
     false);
-  registration_gap_relaxation_enabled_ = declare_parameter<bool>(
+  registration_gap_relaxation_enabled_ = parameters.declare<bool>(
     "registration_gap_relaxation_enabled",
     false);
-  submap_enabled_ = declare_parameter<bool>("submap_enabled", false);
-  place_recognition_use_submaps_ = declare_parameter<bool>(
+  submap_enabled_ = parameters.declare<bool>("submap_enabled", false);
+  place_recognition_use_submaps_ = parameters.declare<bool>(
     "place_recognition_use_submaps",
     false);
-  publish_tf_ = declare_parameter<bool>("publish_tf", false);
-  publish_preprocessed_scan_ = declare_parameter<bool>(
+  publish_tf_ = parameters.declare<bool>("publish_tf", false);
+  publish_preprocessed_scan_ = parameters.declare<bool>(
     "publish_preprocessed_scan",
     false);
-  crop_box_enabled_ = declare_parameter<bool>("crop_box_enabled", true);
+  crop_box_enabled_ = parameters.declare<bool>("crop_box_enabled", true);
 
-  cloud_sync_wait_for_nearest_candidate_ = declare_parameter<bool>(
+  cloud_sync_wait_for_nearest_candidate_ = parameters.declare<bool>(
     "cloud_sync_wait_for_nearest_candidate",
     false);
-  cloud_sync_allow_wall_timeout_fallback_ = declare_parameter<bool>(
+  cloud_sync_allow_wall_timeout_fallback_ = parameters.declare<bool>(
     "cloud_sync_allow_wall_timeout_fallback",
     true);
-  max_secondary_stamp_delta_s_ = declare_parameter<double>("max_secondary_stamp_delta_s", 0.05);
-  max_auxiliary_stamp_delta_s_ = declare_parameter<double>(
+  max_secondary_stamp_delta_s_ = parameters.declare<double>("max_secondary_stamp_delta_s", 0.05);
+  max_auxiliary_stamp_delta_s_ = parameters.declare<double>(
     "max_auxiliary_stamp_delta_s",
     max_secondary_stamp_delta_s_);
-  cloud_sync_wait_timeout_s_ = declare_parameter<double>(
+  cloud_sync_wait_timeout_s_ = parameters.declare<double>(
     "cloud_sync_wait_timeout_s",
     0.05);
-  cloud_sync_reorder_window_s_ = declare_parameter<double>(
+  cloud_sync_reorder_window_s_ = parameters.declare<double>(
     "cloud_sync_reorder_window_s",
     0.02);
-  cloud_processing_period_s_ = declare_parameter<double>(
+  cloud_processing_period_s_ = parameters.declare<double>(
     "cloud_processing_period_s",
     0.005);
-  executor_thread_count_ = declare_parameter<int>("executor_thread_count", 2);
+  executor_thread_count_ = parameters.declare<int>("executor_thread_count", 2);
   if (executor_thread_count_ < 1) {
     throw std::invalid_argument("executor_thread_count must be at least 1");
   }
-  min_range_m_ = declare_parameter<double>("min_range_m", 0.5);
-  max_range_m_ = declare_parameter<double>("max_range_m", 80.0);
-  z_min_m_ = declare_parameter<double>("z_min_m", -5.0);
-  z_max_m_ = declare_parameter<double>("z_max_m", 8.0);
-  scan_voxel_leaf_m_ = declare_parameter<double>("scan_voxel_leaf_m", 0.25);
-  adaptive_scan_voxel_leaf_m_ = declare_parameter<double>("adaptive_scan_voxel_leaf_m", 0.15);
-  registration_only_cloud_voxel_leaf_m_ = declare_parameter<double>(
+  min_range_m_ = parameters.declare<double>("min_range_m", 0.5);
+  max_range_m_ = parameters.declare<double>("max_range_m", 80.0);
+  z_min_m_ = parameters.declare<double>("z_min_m", -5.0);
+  z_max_m_ = parameters.declare<double>("z_max_m", 8.0);
+  scan_voxel_leaf_m_ = parameters.declare<double>("scan_voxel_leaf_m", 0.25);
+  adaptive_scan_voxel_leaf_m_ = parameters.declare<double>("adaptive_scan_voxel_leaf_m", 0.15);
+  registration_only_cloud_voxel_leaf_m_ = parameters.declare<double>(
     "registration_only_cloud_voxel_leaf_m",
     0.30);
-  registration_only_cloud_max_point_ratio_ = declare_parameter<double>(
+  registration_only_cloud_max_point_ratio_ = parameters.declare<double>(
     "registration_only_cloud_max_point_ratio",
     0.50);
-  map_voxel_leaf_m_ = declare_parameter<double>("map_voxel_leaf_m", 0.35);
-  local_map_radius_m_ = declare_parameter<double>("local_map_radius_m", 35.0);
-  local_map_vertical_radius_m_ = declare_parameter<double>(
+  map_voxel_leaf_m_ = parameters.declare<double>("map_voxel_leaf_m", 0.35);
+  if (parameters.declare<bool>("temporal_static_map_enabled", false)) {
+    throw std::invalid_argument(
+            "temporal_static_map_enabled moved to slam_3d_map_cleanup; disable the old flag, "
+            "set keyframe_archive_directory, export keyframes and run temporal_map_cleanup");
+  }
+  local_map_radius_m_ = parameters.declare<double>("local_map_radius_m", 35.0);
+  local_map_vertical_radius_m_ = parameters.declare<double>(
     "local_map_vertical_radius_m",
     0.0);
-  keyframe_translation_m_ = declare_parameter<double>("keyframe_translation_m", 0.8);
-  keyframe_rotation_deg_ = declare_parameter<double>("keyframe_rotation_deg", 8.0);
-  keyframe_vertical_translation_m_ = declare_parameter<double>(
+  keyframe_translation_m_ = parameters.declare<double>("keyframe_translation_m", 0.8);
+  keyframe_rotation_deg_ = parameters.declare<double>("keyframe_rotation_deg", 8.0);
+  keyframe_vertical_translation_m_ = parameters.declare<double>(
     "keyframe_vertical_translation_m",
     0.0);
-  keyframe_rotation_3d_deg_ = declare_parameter<double>(
+  keyframe_rotation_3d_deg_ = parameters.declare<double>(
     "keyframe_rotation_3d_deg",
     0.0);
-  icp_max_correspondence_m_ = declare_parameter<double>("icp_max_correspondence_m", 2.0);
-  fitness_score_threshold_ = declare_parameter<double>("fitness_score_threshold", 2.0);
-  robust_registration_trim_ratio_ = declare_parameter<double>(
+  icp_max_correspondence_m_ = parameters.declare<double>("icp_max_correspondence_m", 2.0);
+  fitness_score_threshold_ = parameters.declare<double>("fitness_score_threshold", 2.0);
+  robust_registration_trim_ratio_ = parameters.declare<double>(
     "robust_registration_trim_ratio",
     0.85);
-  robust_registration_refinement_max_correspondence_m_ = declare_parameter<double>(
+  robust_registration_refinement_max_correspondence_m_ = parameters.declare<double>(
     "robust_registration_refinement_max_correspondence_m",
     0.8);
-  robust_registration_quality_max_correspondence_m_ = declare_parameter<double>(
+  robust_registration_quality_max_correspondence_m_ = parameters.declare<double>(
     "robust_registration_quality_max_correspondence_m",
     0.8);
-  constant_velocity_translation_limit_m_ = declare_parameter<double>(
+  constant_velocity_translation_limit_m_ = parameters.declare<double>(
     "constant_velocity_translation_limit_m",
     2.0);
-  constant_velocity_rotation_limit_deg_ = declare_parameter<double>(
+  constant_velocity_rotation_limit_deg_ = parameters.declare<double>(
     "constant_velocity_rotation_limit_deg",
     30.0);
-  wheel_odom_buffer_duration_s_ = declare_parameter<double>(
+  wheel_odom_buffer_duration_s_ = parameters.declare<double>(
     "wheel_odom_buffer_duration_s",
     30.0);
-  wheel_odom_max_time_delta_s_ = declare_parameter<double>(
+  wheel_odom_max_time_delta_s_ = parameters.declare<double>(
     "wheel_odom_max_time_delta_s",
     0.15);
-  wheel_odom_max_interpolation_gap_s_ = declare_parameter<double>(
+  wheel_odom_max_interpolation_gap_s_ = parameters.declare<double>(
     "wheel_odom_max_interpolation_gap_s",
     0.25);
-  wheel_imu_slope_z_prediction_enabled_ = declare_parameter<bool>(
+  wheel_imu_slope_z_prediction_enabled_ = parameters.declare<bool>(
     "wheel_imu_slope_z_prediction_enabled", false);
-  wheel_imu_slope_z_prediction_max_pitch_deg_ = declare_parameter<double>(
+  wheel_imu_slope_z_prediction_max_pitch_deg_ = parameters.declare<double>(
     "wheel_imu_slope_z_prediction_max_pitch_deg", 25.0);
-  wheel_imu_slope_z_prediction_weight_ = declare_parameter<double>(
+  wheel_imu_slope_z_prediction_weight_ = parameters.declare<double>(
     "wheel_imu_slope_z_prediction_weight", 0.5);
-  wheel_odom_timestamp_reset_threshold_s_ = declare_parameter<double>(
+  wheel_odom_timestamp_reset_threshold_s_ = parameters.declare<double>(
     "wheel_odom_timestamp_reset_threshold_s",
     0.5);
-  motion_prior_fallback_max_step_m_ = declare_parameter<double>(
+  motion_prior_fallback_max_step_m_ = parameters.declare<double>(
     "motion_prior_fallback_max_step_m",
     0.0);
-  motion_prior_fallback_max_z_step_m_ = declare_parameter<double>(
+  motion_prior_fallback_max_z_step_m_ = parameters.declare<double>(
     "motion_prior_fallback_max_z_step_m",
     0.0);
-  motion_prior_fallback_max_untrusted_distance_m_ = declare_parameter<double>(
+  motion_prior_fallback_max_untrusted_distance_m_ = parameters.declare<double>(
     "motion_prior_fallback_max_untrusted_distance_m",
     0.0);
-  motion_prior_fallback_max_untrusted_z_m_ = declare_parameter<double>(
+  motion_prior_fallback_max_untrusted_z_m_ = parameters.declare<double>(
     "motion_prior_fallback_max_untrusted_z_m",
     0.0);
-  motion_prior_fallback_max_rotation_deg_ = declare_parameter<double>(
+  motion_prior_fallback_max_rotation_deg_ = parameters.declare<double>(
     "motion_prior_fallback_max_rotation_deg",
     0.0);
-  max_registration_correction_translation_m_ = declare_parameter<double>(
+  max_registration_correction_translation_m_ = parameters.declare<double>(
     "max_registration_correction_translation_m",
     4.0);
-  max_registration_correction_rotation_deg_ = declare_parameter<double>(
+  max_registration_correction_rotation_deg_ = parameters.declare<double>(
     "max_registration_correction_rotation_deg",
     60.0);
-  registration_gap_relaxation_min_gap_s_ = declare_parameter<double>(
+  registration_gap_relaxation_min_gap_s_ = parameters.declare<double>(
     "registration_gap_relaxation_min_gap_s",
     0.5);
-  registration_gap_relaxation_max_speed_mps_ = declare_parameter<double>(
+  registration_gap_relaxation_max_speed_mps_ = parameters.declare<double>(
     "registration_gap_relaxation_max_speed_mps",
     0.0);
-  registration_gap_relaxation_max_translation_m_ = declare_parameter<double>(
+  registration_gap_relaxation_max_translation_m_ = parameters.declare<double>(
     "registration_gap_relaxation_max_translation_m",
     0.0);
-  registration_gap_relaxation_min_inlier_ratio_ = declare_parameter<double>(
+  registration_gap_relaxation_min_inlier_ratio_ = parameters.declare<double>(
     "registration_gap_relaxation_min_inlier_ratio",
     0.0);
-  registration_gap_relaxation_max_inlier_rmse_m_ = declare_parameter<double>(
+  registration_gap_relaxation_max_inlier_rmse_m_ = parameters.declare<double>(
     "registration_gap_relaxation_max_inlier_rmse_m",
     0.0);
-  deskew_point_time_field_ = declare_parameter<std::string>("deskew_point_time_field", "auto");
-  deskew_point_time_scale_ = declare_parameter<double>("deskew_point_time_scale", 0.0);
-  deskew_point_time_offset_s_ = declare_parameter<double>("deskew_point_time_offset_s", 0.0);
-  deskew_max_scan_duration_s_ = declare_parameter<double>("deskew_max_scan_duration_s", 0.2);
-  deskew_max_imu_gap_s_ = declare_parameter<double>("deskew_max_imu_gap_s", 0.05);
-  deskew_imu_buffer_duration_s_ = declare_parameter<double>("deskew_imu_buffer_duration_s", 5.0);
-  deskew_imu_wait_timeout_s_ = declare_parameter<double>(
+  deskew_point_time_field_ = parameters.declare<std::string>("deskew_point_time_field", "auto");
+  deskew_point_time_scale_ = parameters.declare<double>("deskew_point_time_scale", 0.0);
+  deskew_point_time_offset_s_ = parameters.declare<double>("deskew_point_time_offset_s", 0.0);
+  deskew_max_scan_duration_s_ = parameters.declare<double>("deskew_max_scan_duration_s", 0.2);
+  deskew_max_imu_gap_s_ = parameters.declare<double>("deskew_max_imu_gap_s", 0.05);
+  deskew_imu_buffer_duration_s_ = parameters.declare<double>("deskew_imu_buffer_duration_s", 5.0);
+  deskew_imu_wait_timeout_s_ = parameters.declare<double>(
     "deskew_imu_wait_timeout_s",
     0.25);
-  initialization_warmup_duration_s_ = declare_parameter<double>(
+  initialization_warmup_duration_s_ = parameters.declare<double>(
     "initialization_warmup_duration_s",
     0.0);
-  deskew_min_time_ratio_ = declare_parameter<double>("deskew_min_time_ratio", 0.5);
-  deskew_time_bin_s_ = declare_parameter<double>("deskew_time_bin_s", 0.001);
-  deskew_angular_velocity_scale_ = declare_parameter<double>(
+  deskew_min_time_ratio_ = parameters.declare<double>("deskew_min_time_ratio", 0.5);
+  deskew_time_bin_s_ = parameters.declare<double>("deskew_time_bin_s", 0.001);
+  deskew_angular_velocity_scale_ = parameters.declare<double>(
     "deskew_angular_velocity_scale",
     1.0);
-  inter_lidar_motion_compensation_max_dt_s_ = declare_parameter<double>(
+  inter_lidar_motion_compensation_max_dt_s_ = parameters.declare<double>(
     "inter_lidar_motion_compensation_max_dt_s",
     0.05);
-  inter_lidar_imu_rotation_scale_ = declare_parameter<double>(
+  inter_lidar_imu_rotation_scale_ = parameters.declare<double>(
     "inter_lidar_imu_rotation_scale",
     1.0);
-  inter_lidar_gap_recovery_hypothesis_min_gap_s_ = declare_parameter<double>(
+  inter_lidar_gap_recovery_hypothesis_min_gap_s_ = parameters.declare<double>(
     "inter_lidar_gap_recovery_hypothesis_min_gap_s",
     0.5);
   inter_lidar_gap_recovery_hypothesis_min_score_improvement_ratio_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "inter_lidar_gap_recovery_hypothesis_min_score_improvement_ratio",
     0.02);
-  deskew_imu_to_base_roll_deg_ = declare_parameter<double>(
+  deskew_imu_to_base_roll_deg_ = parameters.declare<double>(
     "deskew_imu_to_base_roll_deg",
     0.0);
-  deskew_imu_to_base_pitch_deg_ = declare_parameter<double>(
+  deskew_imu_to_base_pitch_deg_ = parameters.declare<double>(
     "deskew_imu_to_base_pitch_deg",
     0.0);
-  deskew_imu_to_base_yaw_deg_ = declare_parameter<double>(
+  deskew_imu_to_base_yaw_deg_ = parameters.declare<double>(
     "deskew_imu_to_base_yaw_deg",
     0.0);
-  imu_rotation_prediction_max_dt_s_ = declare_parameter<double>(
+  imu_rotation_prediction_max_dt_s_ = parameters.declare<double>(
     "imu_rotation_prediction_max_dt_s",
     0.5);
-  imu_rotation_prediction_scale_ = declare_parameter<double>(
+  imu_rotation_prediction_scale_ = parameters.declare<double>(
     "imu_rotation_prediction_scale",
     1.0);
-  imu_orientation_prediction_max_time_delta_s_ = declare_parameter<double>(
+  imu_orientation_prediction_max_time_delta_s_ = parameters.declare<double>(
     "imu_orientation_prediction_max_time_delta_s",
     0.05);
-  imu_relative_attitude_max_time_delta_s_ = declare_parameter<double>(
+  imu_relative_attitude_max_time_delta_s_ = parameters.declare<double>(
     "imu_relative_attitude_max_time_delta_s",
     0.05);
   imu_relative_attitude_constraint_config_.max_roll_pitch_correction_deg =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "imu_relative_roll_pitch_max_correction_deg",
     0.0);
-  imu_roughness_window_s_ = declare_parameter<double>(
+  imu_roughness_window_s_ = parameters.declare<double>(
     "imu_roughness_window_s",
     0.35);
-  imu_roughness_recent_event_window_s_ = declare_parameter<double>(
+  imu_roughness_recent_event_window_s_ = parameters.declare<double>(
     "imu_roughness_recent_event_window_s",
     1.0);
-  imu_roughness_angular_velocity_threshold_radps_ = declare_parameter<double>(
+  imu_roughness_angular_velocity_threshold_radps_ = parameters.declare<double>(
     "imu_roughness_angular_velocity_threshold_radps",
     2.5);
-  imu_roughness_angular_accel_threshold_radps2_ = declare_parameter<double>(
+  imu_roughness_angular_accel_threshold_radps2_ = parameters.declare<double>(
     "imu_roughness_angular_accel_threshold_radps2",
     40.0);
-  imu_roughness_accel_norm_delta_threshold_mps2_ = declare_parameter<double>(
+  imu_roughness_accel_norm_delta_threshold_mps2_ = parameters.declare<double>(
     "imu_roughness_accel_norm_delta_threshold_mps2",
     3.0);
-  imu_roughness_linear_jerk_threshold_mps3_ = declare_parameter<double>(
+  imu_roughness_linear_jerk_threshold_mps3_ = parameters.declare<double>(
     "imu_roughness_linear_jerk_threshold_mps3",
     60.0);
-  imu_shock_hold_duration_s_ = declare_parameter<double>(
+  imu_shock_hold_duration_s_ = parameters.declare<double>(
     "imu_shock_hold_duration_s",
     0.5);
-  imu_shock_recovery_stable_scans_ = declare_parameter<int>(
+  imu_shock_recovery_stable_scans_ = parameters.declare<int>(
     "imu_shock_recovery_stable_scans",
     3);
-  suppress_constant_velocity_on_imu_shock_ = declare_parameter<bool>(
+  suppress_constant_velocity_on_imu_shock_ = parameters.declare<bool>(
     "suppress_constant_velocity_on_imu_shock",
     true);
-  omit_shock_poses_from_path_ = declare_parameter<bool>(
+  omit_shock_poses_from_path_ = parameters.declare<bool>(
     "omit_shock_poses_from_path",
     true);
   imu_shock_policy_config_.enabled =
     imu_roughness_detection_enabled_ && imu_shock_policy_enabled_;
   imu_shock_policy_config_.hold_duration_s = imu_shock_hold_duration_s_;
   imu_shock_policy_config_.recovery_stable_scans = imu_shock_recovery_stable_scans_;
-  keyframe_quarantine_correction_translation_m_ = declare_parameter<double>(
+  keyframe_quarantine_correction_translation_m_ = parameters.declare<double>(
     "keyframe_quarantine_correction_translation_m",
     0.8);
   place_recognition_registration_only_keyframe_quarantine_correction_translation_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_registration_only_keyframe_quarantine_correction_translation_m",
     0.0);
   place_recognition_mapping_refinement_keyframe_quarantine_correction_translation_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_keyframe_quarantine_correction_translation_m",
     0.0);
-  keyframe_quarantine_correction_rotation_deg_ = declare_parameter<double>(
+  keyframe_quarantine_correction_rotation_deg_ = parameters.declare<double>(
     "keyframe_quarantine_correction_rotation_deg",
     15.0);
   place_recognition_mapping_refinement_keyframe_quarantine_correction_rotation_deg_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_keyframe_quarantine_correction_rotation_deg",
     0.0);
-  place_recognition_periodic_min_interval_s_ = declare_parameter<double>(
+  place_recognition_periodic_min_interval_s_ = parameters.declare<double>(
     "place_recognition_periodic_min_interval_s",
     3.0);
-  place_recognition_relocalization_min_interval_s_ = declare_parameter<double>(
+  place_recognition_relocalization_min_interval_s_ = parameters.declare<double>(
     "place_recognition_relocalization_min_interval_s",
     0.0);
-  place_recognition_shock_relocalization_cooldown_s_ = declare_parameter<double>(
+  place_recognition_shock_relocalization_cooldown_s_ = parameters.declare<double>(
     "place_recognition_shock_relocalization_cooldown_s",
     0.0);
-  place_recognition_max_descriptor_distance_ = declare_parameter<double>(
+  place_recognition_max_descriptor_distance_ = parameters.declare<double>(
     "place_recognition_max_descriptor_distance",
     0.20);
-  place_recognition_min_inlier_ratio_ = declare_parameter<double>(
+  place_recognition_min_inlier_ratio_ = parameters.declare<double>(
     "place_recognition_min_inlier_ratio",
     0.35);
-  place_recognition_max_inlier_rmse_m_ = declare_parameter<double>(
+  place_recognition_max_inlier_rmse_m_ = parameters.declare<double>(
     "place_recognition_max_inlier_rmse_m",
     0.8);
-  place_recognition_max_pose_jump_m_ = declare_parameter<double>(
+  place_recognition_max_pose_jump_m_ = parameters.declare<double>(
     "place_recognition_max_pose_jump_m",
     3.0);
-  place_recognition_max_pose_jump_rotation_deg_ = declare_parameter<double>(
+  place_recognition_max_pose_jump_rotation_deg_ = parameters.declare<double>(
     "place_recognition_max_pose_jump_rotation_deg",
     45.0);
   place_recognition_mapping_refinement_large_pose_jump_max_translation_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_large_pose_jump_max_translation_m",
     0.0);
   place_recognition_mapping_refinement_large_pose_jump_max_rotation_deg_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_large_pose_jump_max_rotation_deg",
     0.0);
   place_recognition_mapping_refinement_large_pose_jump_max_descriptor_distance_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_large_pose_jump_max_descriptor_distance",
     0.0);
-  mapping_cloud_verified_coarse_config_.min_inlier_ratio = declare_parameter<double>(
+  mapping_cloud_verified_coarse_config_.min_inlier_ratio = parameters.declare<double>(
     "place_recognition_mapping_refinement_large_pose_jump_verified_coarse_min_inlier_ratio",
     0.0);
-  mapping_cloud_verified_coarse_config_.max_inlier_rmse_m = declare_parameter<double>(
+  mapping_cloud_verified_coarse_config_.max_inlier_rmse_m = parameters.declare<double>(
     "place_recognition_mapping_refinement_large_pose_jump_verified_coarse_max_inlier_rmse_m",
     0.0);
   mapping_cloud_verified_coarse_config_.min_target_coverage_ratio =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_large_pose_jump_verified_coarse_min_target_coverage_ratio",
     0.0);
   mapping_cloud_verified_coarse_config_.max_score_regression_ratio =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_large_pose_jump_verified_coarse_max_score_regression_ratio",
     0.0);
-  place_recognition_max_yaw_offset_deg_ = declare_parameter<double>(
+  place_recognition_max_yaw_offset_deg_ = parameters.declare<double>(
     "place_recognition_max_yaw_offset_deg",
     180.0);
-  place_recognition_max_vertical_separation_m_ = declare_parameter<double>(
+  place_recognition_max_vertical_separation_m_ = parameters.declare<double>(
     "place_recognition_max_vertical_separation_m",
     0.0);
-  place_recognition_registration_only_vertical_recovery_m_ = declare_parameter<double>(
+  place_recognition_registration_only_vertical_recovery_m_ = parameters.declare<double>(
     "place_recognition_registration_only_vertical_recovery_m",
     0.0);
   place_recognition_registration_only_same_layer_xy_max_distance_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_registration_only_same_layer_xy_max_distance_m",
     0.0);
-  place_recognition_registration_only_max_pose_jump_m_ = declare_parameter<double>(
+  place_recognition_registration_only_max_pose_jump_m_ = parameters.declare<double>(
     "place_recognition_registration_only_max_pose_jump_m",
     0.0);
-  place_recognition_submap_consistency_max_translation_m_ = declare_parameter<double>(
+  place_recognition_submap_consistency_max_translation_m_ = parameters.declare<double>(
     "place_recognition_submap_consistency_max_translation_m",
     0.0);
   place_recognition_registration_only_consistency_max_translation_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_registration_only_consistency_max_translation_m",
     0.0);
-  place_recognition_registration_only_consistency_max_gap_s_ = declare_parameter<double>(
+  place_recognition_registration_only_consistency_max_gap_s_ = parameters.declare<double>(
     "place_recognition_registration_only_consistency_max_gap_s",
     0.0);
-  place_recognition_submap_consistency_max_rotation_deg_ = declare_parameter<double>(
+  place_recognition_submap_consistency_max_rotation_deg_ = parameters.declare<double>(
     "place_recognition_submap_consistency_max_rotation_deg",
     0.0);
   place_recognition_mapping_refinement_quality_max_correspondence_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_quality_max_correspondence_m",
     0.8);
   place_recognition_mapping_refinement_target_confirmation_voxel_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_target_confirmation_voxel_m",
     0.35);
-  mapping_cloud_refinement_config_.min_inlier_ratio = declare_parameter<double>(
+  mapping_cloud_refinement_config_.min_inlier_ratio = parameters.declare<double>(
     "place_recognition_mapping_refinement_min_inlier_ratio",
     0.20);
   place_recognition_mapping_refinement_min_target_coverage_ratio_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_min_target_coverage_ratio",
     0.0);
   mapping_cloud_refinement_config_.min_target_coverage_ratio =
     place_recognition_mapping_refinement_min_target_coverage_ratio_;
-  mapping_cloud_refinement_config_.max_inlier_rmse_m = declare_parameter<double>(
+  mapping_cloud_refinement_config_.max_inlier_rmse_m = parameters.declare<double>(
     "place_recognition_mapping_refinement_max_inlier_rmse_m",
     0.30);
-  mapping_cloud_refinement_config_.max_translation_m = declare_parameter<double>(
+  mapping_cloud_refinement_config_.max_translation_m = parameters.declare<double>(
     "place_recognition_mapping_refinement_max_translation_m",
     0.75);
-  mapping_cloud_refinement_config_.max_rotation_deg = declare_parameter<double>(
+  mapping_cloud_refinement_config_.max_rotation_deg = parameters.declare<double>(
     "place_recognition_mapping_refinement_max_rotation_deg",
     5.0);
-  mapping_cloud_refinement_config_.max_hessian_condition = declare_parameter<double>(
+  mapping_cloud_refinement_config_.max_hessian_condition = parameters.declare<double>(
     "place_recognition_mapping_refinement_max_hessian_condition",
     0.0);
-  mapping_cloud_refinement_config_.min_score_improvement_ratio = declare_parameter<double>(
+  mapping_cloud_refinement_config_.min_score_improvement_ratio = parameters.declare<double>(
     "place_recognition_mapping_refinement_min_score_improvement_ratio",
     0.05);
   mapping_cloud_refinement_config_.max_primary_score_regression_ratio =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "place_recognition_mapping_refinement_max_primary_score_regression_ratio",
     0.05);
-  submap_max_travel_m_ = declare_parameter<double>(
+  submap_max_travel_m_ = parameters.declare<double>(
     "submap_max_travel_m",
     20.0);
-  pose_graph_correction_max_translation_m_ = declare_parameter<double>(
+  pose_graph_correction_max_translation_m_ = parameters.declare<double>(
     "pose_graph_correction_max_translation_m",
     5.0);
-  pose_graph_correction_max_rotation_deg_ = declare_parameter<double>(
+  pose_graph_correction_max_rotation_deg_ = parameters.declare<double>(
     "pose_graph_correction_max_rotation_deg",
     45.0);
-  pose_graph_correction_min_interval_s_ = declare_parameter<double>(
+  pose_graph_correction_min_interval_s_ = parameters.declare<double>(
     "pose_graph_correction_min_interval_s",
     1.0);
   pose_graph_minimum_interval_override_config_.max_descriptor_distance =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "pose_graph_minimum_interval_override_max_descriptor_distance",
     0.12);
   pose_graph_minimum_interval_override_config_.min_inlier_ratio =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "pose_graph_minimum_interval_override_min_inlier_ratio",
     0.90);
   pose_graph_minimum_interval_override_config_.max_inlier_rmse_m =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "pose_graph_minimum_interval_override_max_inlier_rmse_m",
     0.15);
   pose_graph_minimum_interval_override_config_.min_target_coverage_ratio =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "pose_graph_minimum_interval_override_min_target_coverage_ratio",
     0.50);
   pose_graph_minimum_interval_override_single_floor_xy_max_distance_m_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "pose_graph_minimum_interval_override_single_floor_xy_max_distance_m",
     1.5);
   pose_graph_minimum_interval_override_single_floor_z_weight_multiplier_ =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "pose_graph_minimum_interval_override_single_floor_z_weight_multiplier",
     1.0);
-  pose_graph_optimization_step_ = declare_parameter<double>(
+  pose_graph_optimization_step_ = parameters.declare<double>(
     "pose_graph_optimization_step",
     0.15);
-  pose_graph_odom_translation_weight_ = declare_parameter<double>(
+  pose_graph_odom_translation_weight_ = parameters.declare<double>(
     "pose_graph_odom_translation_weight",
     1.0);
-  pose_graph_odom_rotation_weight_ = declare_parameter<double>(
+  pose_graph_odom_rotation_weight_ = parameters.declare<double>(
     "pose_graph_odom_rotation_weight",
     1.0);
-  pose_graph_loop_translation_weight_ = declare_parameter<double>(
+  pose_graph_loop_translation_weight_ = parameters.declare<double>(
     "pose_graph_loop_translation_weight",
     1.0);
-  pose_graph_loop_rotation_weight_ = declare_parameter<double>(
+  pose_graph_loop_rotation_weight_ = parameters.declare<double>(
     "pose_graph_loop_rotation_weight",
     1.0);
-  pose_graph_loop_cauchy_scale_ = declare_parameter<double>(
+  pose_graph_information_config_.relative_eigen_threshold = parameters.declare<double>(
+    "pose_graph_information_relative_eigen_threshold",
+    pose_graph_information_config_.relative_eigen_threshold);
+  pose_graph_information_config_.strong_eigenvalue_ratio = parameters.declare<double>(
+    "pose_graph_information_strong_eigenvalue_ratio",
+    pose_graph_information_config_.strong_eigenvalue_ratio);
+  pose_graph_information_config_.weak_information_ratio = parameters.declare<double>(
+    "pose_graph_information_weak_ratio",
+    pose_graph_information_config_.weak_information_ratio);
+  pose_graph_loop_cauchy_scale_ = parameters.declare<double>(
     "pose_graph_loop_cauchy_scale",
     1.0);
-  pose_graph_min_new_loop_robust_weight_ = declare_parameter<double>(
+  pose_graph_optimizer_config_.max_iterations_per_stage = parameters.declare<int>(
+    "pose_graph_ceres_max_iterations_per_stage",
+    20);
+  pose_graph_optimizer_config_.robust_scale_factors =
+    parameters.declare<std::vector<double>>(
+    "pose_graph_ceres_robust_scale_factors",
+    std::vector<double>{4.0, 2.0, 1.0});
+  pose_graph_optimizer_config_.dcs_enabled = parameters.declare<bool>(
+    "pose_graph_ceres_dcs_enabled",
+    true);
+  pose_graph_optimizer_config_.dcs_start_stage = parameters.declare<int>(
+    "pose_graph_ceres_dcs_start_stage",
+    0);
+  pose_graph_optimizer_config_.dcs_phi = parameters.declare<double>(
+    "pose_graph_ceres_dcs_phi",
+    5.0);
+  pose_graph_optimizer_config_.dcs_min_scale = parameters.declare<double>(
+    "pose_graph_ceres_dcs_min_scale",
+    0.05);
+  pose_graph_optimizer_config_.function_tolerance = parameters.declare<double>(
+    "pose_graph_ceres_function_tolerance",
+    1.0e-6);
+  pose_graph_optimizer_config_.gradient_tolerance = parameters.declare<double>(
+    "pose_graph_ceres_gradient_tolerance",
+    1.0e-10);
+  pose_graph_optimizer_config_.parameter_tolerance = parameters.declare<double>(
+    "pose_graph_ceres_parameter_tolerance",
+    1.0e-8);
+  pose_graph_optimizer_config_.num_threads = parameters.declare<int>(
+    "pose_graph_ceres_num_threads",
+    1);
+  pose_graph_optimizer_config_.use_nonmonotonic_steps = parameters.declare<bool>(
+    "pose_graph_ceres_use_nonmonotonic_steps",
+    false);
+  pose_graph_optimizer_config_.robust_loop_enabled = pose_graph_robust_loop_enabled_;
+  pose_graph_optimizer_config_.loop_cauchy_scale = pose_graph_loop_cauchy_scale_;
+  pose_graph_min_new_loop_robust_weight_ = parameters.declare<double>(
     "pose_graph_min_new_loop_robust_weight",
     0.0);
-  pose_graph_max_iteration_translation_step_m_ = declare_parameter<double>(
+  pose_graph_max_iteration_translation_step_m_ = parameters.declare<double>(
     "pose_graph_max_iteration_translation_step_m",
     0.25);
-  pose_graph_max_iteration_rotation_step_deg_ = declare_parameter<double>(
+  pose_graph_max_iteration_rotation_step_deg_ = parameters.declare<double>(
     "pose_graph_max_iteration_rotation_step_deg",
     5.0);
-  pose_graph_max_loop_residual_before_ = declare_parameter<double>(
+  pose_graph_max_loop_residual_before_ = parameters.declare<double>(
     "pose_graph_max_loop_residual_before",
     0.0);
-  pose_graph_max_residual_after_ = declare_parameter<double>(
+  pose_graph_max_residual_after_ = parameters.declare<double>(
     "pose_graph_max_residual_after",
     0.0);
-  pose_graph_max_residual_ratio_ = declare_parameter<double>(
+  pose_graph_max_residual_ratio_ = parameters.declare<double>(
     "pose_graph_max_residual_ratio",
     0.0);
-  planar_pose_max_z_correction_m_ = declare_parameter<double>(
+  planar_pose_max_z_correction_m_ = parameters.declare<double>(
     "planar_pose_max_z_correction_m",
     0.0);
   ground_motion_constraint_config_.nominal_max_body_z_step_m =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "ground_vehicle_nominal_max_body_z_step_m",
     0.0);
   ground_motion_constraint_config_.roughness_max_body_z_step_m =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "ground_vehicle_roughness_max_body_z_step_m",
     0.0);
-  gravity_accel_low_pass_alpha_ = declare_parameter<double>(
+  gravity_accel_low_pass_alpha_ = parameters.declare<double>(
     "gravity_accel_low_pass_alpha",
     0.02);
-  gravity_accel_time_constant_s_ = declare_parameter<double>(
+  gravity_accel_time_constant_s_ = parameters.declare<double>(
     "gravity_accel_time_constant_s",
     0.0);
-  gravity_accel_scale_ = declare_parameter<double>(
+  gravity_accel_scale_ = parameters.declare<double>(
     "gravity_accel_scale",
     1.0);
-  gravity_accel_min_norm_mps2_ = declare_parameter<double>(
+  gravity_accel_min_norm_mps2_ = parameters.declare<double>(
     "gravity_accel_min_norm_mps2",
     6.0);
-  gravity_accel_max_norm_mps2_ = declare_parameter<double>(
+  gravity_accel_max_norm_mps2_ = parameters.declare<double>(
     "gravity_accel_max_norm_mps2",
     13.0);
-  gravity_accel_max_age_s_ = declare_parameter<double>(
+  gravity_accel_max_age_s_ = parameters.declare<double>(
     "gravity_accel_max_age_s",
     0.1);
-  imu_reorder_tolerance_s_ = declare_parameter<double>(
+  imu_reorder_tolerance_s_ = parameters.declare<double>(
     "imu_reorder_tolerance_s",
     0.02);
-  imu_timestamp_reset_threshold_s_ = declare_parameter<double>(
+  imu_timestamp_reset_threshold_s_ = parameters.declare<double>(
     "imu_timestamp_reset_threshold_s",
     0.5);
-  map_z_filter_min_m_ = declare_parameter<double>(
+  map_z_filter_min_m_ = parameters.declare<double>(
     "map_z_filter_min_m",
     -5.0);
-  map_z_filter_max_m_ = declare_parameter<double>(
+  map_z_filter_max_m_ = parameters.declare<double>(
     "map_z_filter_max_m",
     8.0);
-  min_registration_inlier_ratio_ = declare_parameter<double>(
+  min_registration_inlier_ratio_ = parameters.declare<double>(
     "min_registration_inlier_ratio",
     0.15);
-  max_registration_inlier_rmse_m_ = declare_parameter<double>(
+  max_registration_inlier_rmse_m_ = parameters.declare<double>(
     "max_registration_inlier_rmse_m",
     1.5);
-  map_publish_period_s_ = declare_parameter<double>("map_publish_period_s", 1.0);
-  scan_to_scan_max_reference_age_s_ = declare_parameter<double>(
+  map_publish_period_s_ = parameters.declare<double>("map_publish_period_s", 1.0);
+  scan_to_scan_max_reference_age_s_ = parameters.declare<double>(
     "scan_to_scan_max_reference_age_s",
     0.0);
 
-  crop_min_x_ = declare_parameter<double>("crop_min_x", -0.6);
-  crop_max_x_ = declare_parameter<double>("crop_max_x", 0.6);
-  crop_min_y_ = declare_parameter<double>("crop_min_y", -0.45);
-  crop_max_y_ = declare_parameter<double>("crop_max_y", 0.45);
-  crop_min_z_ = declare_parameter<double>("crop_min_z", -0.8);
-  crop_max_z_ = declare_parameter<double>("crop_max_z", 0.8);
+  crop_min_x_ = parameters.declare<double>("crop_min_x", -0.6);
+  crop_max_x_ = parameters.declare<double>("crop_max_x", 0.6);
+  crop_min_y_ = parameters.declare<double>("crop_min_y", -0.45);
+  crop_max_y_ = parameters.declare<double>("crop_max_y", 0.45);
+  crop_min_z_ = parameters.declare<double>("crop_min_z", -0.8);
+  crop_max_z_ = parameters.declare<double>("crop_max_z", 0.8);
 
-  terrain_config_.enabled = declare_parameter<bool>(
+  terrain_config_.enabled = parameters.declare<bool>(
     "terrain_evidence_enabled",
     false);
-  terrain_config_.azimuth_bins = declare_parameter<int>(
+  terrain_config_.azimuth_bins = parameters.declare<int>(
     "terrain_azimuth_bins",
     120);
-  terrain_config_.radial_bin_size_m = declare_parameter<double>(
+  terrain_config_.radial_bin_size_m = parameters.declare<double>(
     "terrain_radial_bin_size_m",
     0.25);
-  terrain_config_.min_range_m = declare_parameter<double>(
+  terrain_config_.min_range_m = parameters.declare<double>(
     "terrain_min_range_m",
     0.8);
-  terrain_config_.max_range_m = declare_parameter<double>(
+  terrain_config_.max_range_m = parameters.declare<double>(
     "terrain_max_range_m",
     12.0);
-  terrain_config_.seed_max_range_m = declare_parameter<double>(
+  terrain_config_.seed_max_range_m = parameters.declare<double>(
     "terrain_seed_max_range_m",
     3.0);
-  terrain_config_.classification_voxel_size_m = declare_parameter<double>(
+  terrain_config_.classification_voxel_size_m = parameters.declare<double>(
     "terrain_classification_voxel_size_m",
     0.10);
-  terrain_config_.min_points_per_bin = declare_parameter<int>(
+  terrain_config_.min_points_per_bin = parameters.declare<int>(
     "terrain_min_points_per_bin",
     2);
-  terrain_config_.floor_quantile = declare_parameter<double>(
+  terrain_config_.floor_quantile = parameters.declare<double>(
     "terrain_floor_quantile",
     0.20);
-  terrain_config_.seed_reference_height_m = declare_parameter<double>(
+  terrain_config_.seed_reference_height_m = parameters.declare<double>(
     "terrain_seed_reference_height_m",
     0.0);
-  terrain_config_.seed_height_cluster_tolerance_m = declare_parameter<double>(
+  terrain_config_.seed_height_cluster_tolerance_m = parameters.declare<double>(
     "terrain_seed_height_cluster_tolerance_m",
     0.10);
-  terrain_config_.seed_min_cluster_bins = declare_parameter<int>(
+  terrain_config_.seed_min_cluster_bins = parameters.declare<int>(
     "terrain_seed_min_cluster_bins",
     3);
-  terrain_config_.max_profile_height_above_base_m = declare_parameter<double>(
+  terrain_config_.max_profile_height_above_base_m = parameters.declare<double>(
     "terrain_max_profile_height_above_base_m",
     0.50);
-  terrain_config_.max_seed_height_delta_m = declare_parameter<double>(
+  terrain_config_.max_seed_height_delta_m = parameters.declare<double>(
     "terrain_max_seed_height_delta_m",
     0.45);
-  terrain_config_.ground_band_m = declare_parameter<double>(
+  terrain_config_.ground_band_m = parameters.declare<double>(
     "terrain_ground_band_m",
     0.10);
-  terrain_config_.max_adjacent_gap_m = declare_parameter<double>(
+  terrain_config_.max_adjacent_gap_m = parameters.declare<double>(
     "terrain_max_adjacent_gap_m",
     0.55);
-  terrain_config_.floor_max_slope_deg = declare_parameter<double>(
+  terrain_config_.floor_max_slope_deg = parameters.declare<double>(
     "terrain_floor_max_slope_deg",
     4.0);
-  terrain_config_.ramp_min_slope_deg = declare_parameter<double>(
+  terrain_config_.ramp_min_slope_deg = parameters.declare<double>(
     "terrain_ramp_min_slope_deg",
     5.0);
-  terrain_config_.ramp_max_slope_deg = declare_parameter<double>(
+  terrain_config_.ramp_max_slope_deg = parameters.declare<double>(
     "terrain_ramp_max_slope_deg",
     22.0);
-  terrain_config_.ramp_min_run_bins = declare_parameter<int>(
+  terrain_config_.ramp_min_run_bins = parameters.declare<int>(
     "terrain_ramp_min_run_bins",
     3);
-  terrain_config_.ramp_min_run_length_m = declare_parameter<double>(
+  terrain_config_.ramp_min_run_length_m = parameters.declare<double>(
     "terrain_ramp_min_run_length_m",
     0.50);
-  terrain_config_.ramp_plane_validation_enabled = declare_parameter<bool>(
+  terrain_config_.ramp_plane_validation_enabled = parameters.declare<bool>(
     "terrain_ramp_plane_validation_enabled",
     false);
-  terrain_config_.ramp_plane_neighborhood_radius_m = declare_parameter<double>(
+  terrain_config_.ramp_plane_neighborhood_radius_m = parameters.declare<double>(
     "terrain_ramp_plane_neighborhood_radius_m",
     0.75);
-  terrain_config_.ramp_plane_min_points = declare_parameter<int>(
+  terrain_config_.ramp_plane_min_points = parameters.declare<int>(
     "terrain_ramp_plane_min_points",
     12);
-  terrain_config_.ramp_plane_min_length_m = declare_parameter<double>(
+  terrain_config_.ramp_plane_min_length_m = parameters.declare<double>(
     "terrain_ramp_plane_min_length_m",
     0.50);
-  terrain_config_.ramp_plane_min_width_m = declare_parameter<double>(
+  terrain_config_.ramp_plane_min_width_m = parameters.declare<double>(
     "terrain_ramp_plane_min_width_m",
     0.20);
-  terrain_config_.ramp_plane_max_rmse_m = declare_parameter<double>(
+  terrain_config_.ramp_plane_max_rmse_m = parameters.declare<double>(
     "terrain_ramp_plane_max_rmse_m",
     0.05);
-  terrain_config_.ramp_plane_max_outlier_distance_m = declare_parameter<double>(
+  terrain_config_.ramp_plane_max_outlier_distance_m = parameters.declare<double>(
     "terrain_ramp_plane_max_outlier_distance_m",
     0.08);
-  terrain_config_.ramp_plane_min_inlier_ratio = declare_parameter<double>(
+  terrain_config_.ramp_plane_min_inlier_ratio = parameters.declare<double>(
     "terrain_ramp_plane_min_inlier_ratio",
     0.70);
-  terrain_config_.roughness_preview_enabled = declare_parameter<bool>(
+  terrain_config_.roughness_preview_enabled = parameters.declare<bool>(
     "terrain_roughness_preview_enabled",
     true);
-  terrain_config_.roughness_min_height_m = declare_parameter<double>(
+  terrain_config_.roughness_min_height_m = parameters.declare<double>(
     "terrain_roughness_min_height_m",
     0.025);
-  terrain_config_.roughness_max_score = declare_parameter<double>(
+  terrain_config_.roughness_max_score = parameters.declare<double>(
     "terrain_roughness_max_score",
     4.0);
-  terrain_config_.step_min_height_m = declare_parameter<double>(
+  terrain_config_.step_min_height_m = parameters.declare<double>(
     "terrain_step_min_height_m",
     0.08);
-  terrain_config_.step_max_height_m = declare_parameter<double>(
+  terrain_config_.step_max_height_m = parameters.declare<double>(
     "terrain_step_max_height_m",
     0.30);
-  terrain_config_.drop_min_height_m = declare_parameter<double>(
+  terrain_config_.drop_min_height_m = parameters.declare<double>(
     "terrain_drop_min_height_m",
     0.12);
-  terrain_config_.drop_max_height_m = declare_parameter<double>(
+  terrain_config_.drop_max_height_m = parameters.declare<double>(
     "terrain_drop_max_height_m",
     0.60);
-  terrain_config_.transition_support_bins = declare_parameter<int>(
+  terrain_config_.transition_support_bins = parameters.declare<int>(
     "terrain_transition_support_bins",
     1);
-  terrain_config_.staircase_enabled = declare_parameter<bool>(
+  terrain_config_.staircase_enabled = parameters.declare<bool>(
     "terrain_staircase_enabled",
     true);
-  terrain_config_.staircase_min_risers = declare_parameter<int>(
+  terrain_config_.staircase_min_risers = parameters.declare<int>(
     "terrain_staircase_min_risers",
     3);
-  terrain_config_.staircase_min_riser_height_m = declare_parameter<double>(
+  terrain_config_.staircase_min_riser_height_m = parameters.declare<double>(
     "terrain_staircase_min_riser_height_m",
     0.11);
-  terrain_config_.staircase_max_riser_height_m = declare_parameter<double>(
+  terrain_config_.staircase_max_riser_height_m = parameters.declare<double>(
     "terrain_staircase_max_riser_height_m",
     0.30);
-  terrain_config_.staircase_min_tread_depth_m = declare_parameter<double>(
+  terrain_config_.staircase_min_tread_depth_m = parameters.declare<double>(
     "terrain_staircase_min_tread_depth_m",
     0.15);
-  terrain_config_.staircase_max_tread_depth_m = declare_parameter<double>(
+  terrain_config_.staircase_max_tread_depth_m = parameters.declare<double>(
     "terrain_staircase_max_tread_depth_m",
     0.45);
-  terrain_config_.staircase_max_riser_height_deviation_m = declare_parameter<double>(
+  terrain_config_.staircase_max_riser_height_deviation_m = parameters.declare<double>(
     "terrain_staircase_max_riser_height_deviation_m",
     0.06);
-  terrain_config_.staircase_max_tread_depth_deviation_m = declare_parameter<double>(
+  terrain_config_.staircase_max_tread_depth_deviation_m = parameters.declare<double>(
     "terrain_staircase_max_tread_depth_deviation_m",
     0.15);
-  terrain_config_.staircase_min_slope_deg = declare_parameter<double>(
+  terrain_config_.staircase_min_slope_deg = parameters.declare<double>(
     "terrain_staircase_min_slope_deg",
     20.0);
-  terrain_config_.staircase_max_slope_deg = declare_parameter<double>(
+  terrain_config_.staircase_max_slope_deg = parameters.declare<double>(
     "terrain_staircase_max_slope_deg",
     55.0);
-  terrain_config_.staircase_max_profile_height_above_base_m = declare_parameter<double>(
+  terrain_config_.staircase_max_profile_height_above_base_m = parameters.declare<double>(
     "terrain_staircase_max_profile_height_above_base_m",
     2.0);
-  terrain_config_.require_gravity_alignment = declare_parameter<bool>(
+  terrain_config_.require_gravity_alignment = parameters.declare<bool>(
     "terrain_require_gravity_alignment",
     true);
-  terrain_accumulator_config_.voxel_size_m = declare_parameter<double>(
+  terrain_accumulator_config_.voxel_size_m = parameters.declare<double>(
     "terrain_evidence_voxel_size_m",
     0.20);
-  terrain_accumulator_config_.min_confirmations = declare_parameter<int>(
+  terrain_accumulator_config_.min_confirmations = parameters.declare<int>(
     "terrain_min_confirmations",
     2);
-  terrain_accumulator_config_.min_viewpoint_distance_m = declare_parameter<double>(
+  terrain_accumulator_config_.min_viewpoint_distance_m = parameters.declare<double>(
     "terrain_confirmation_min_viewpoint_distance_m",
     0.30);
-  terrain_accumulator_config_.min_view_label_confidence = declare_parameter<double>(
+  terrain_accumulator_config_.min_view_label_confidence = parameters.declare<double>(
     "terrain_min_view_label_confidence",
     0.60);
-  terrain_accumulator_config_.min_label_confidence = declare_parameter<double>(
+  terrain_accumulator_config_.min_label_confidence = parameters.declare<double>(
     "terrain_min_label_confidence",
     0.60);
-  terrain_accumulator_config_.probable_support_min_confidence = declare_parameter<double>(
+  terrain_accumulator_config_.probable_support_min_confidence = parameters.declare<double>(
     "terrain_probable_support_min_confidence",
     0.60);
   terrain_accumulator_config_.probable_support_max_roughness_score =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "terrain_probable_support_max_roughness_score",
     1.50);
   terrain_accumulator_config_.probable_support_require_confirmed_connectivity =
-    declare_parameter<bool>(
+    parameters.declare<bool>(
     "terrain_probable_support_require_confirmed_connectivity",
     true);
   terrain_accumulator_config_.probable_support_max_anchor_distance_m =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "terrain_probable_support_max_anchor_distance_m",
     0.45);
   terrain_accumulator_config_.probable_support_max_neighbor_height_delta_m =
-    declare_parameter<double>(
+    parameters.declare<double>(
     "terrain_probable_support_max_neighbor_height_delta_m",
     0.16);
-  terrain_accumulator_config_.ramp_traversability_scale = declare_parameter<double>(
+  terrain_accumulator_config_.ramp_traversability_scale = parameters.declare<double>(
     "terrain_ramp_traversability_scale",
     0.75);
   terrain_accumulator_.configure(terrain_accumulator_config_);
-  terrain_preview_config_.enabled = declare_parameter<bool>(
+  terrain_preview_config_.enabled = parameters.declare<bool>(
     "terrain_traversal_confirmation_enabled",
     false);
   terrain_preview_config_.voxel_size_m = terrain_accumulator_config_.voxel_size_m;
-  terrain_preview_config_.association_radius_m = declare_parameter<double>(
+  terrain_preview_config_.association_radius_m = parameters.declare<double>(
     "terrain_traversal_association_radius_m",
     0.55);
-  terrain_preview_config_.exit_radius_m = declare_parameter<double>(
+  terrain_preview_config_.exit_radius_m = parameters.declare<double>(
     "terrain_traversal_exit_radius_m",
     0.75);
-  terrain_preview_config_.max_vertical_delta_m = declare_parameter<double>(
+  terrain_preview_config_.max_vertical_delta_m = parameters.declare<double>(
     "terrain_traversal_max_vertical_delta_m",
     0.40);
-  terrain_preview_config_.max_sample_gap_s = declare_parameter<double>(
+  terrain_preview_config_.max_sample_gap_s = parameters.declare<double>(
     "terrain_traversal_max_sample_gap_s",
     0.50);
-  terrain_preview_config_.max_swept_segment_length_m = declare_parameter<double>(
+  terrain_preview_config_.max_swept_segment_length_m = parameters.declare<double>(
     "terrain_traversal_max_swept_segment_length_m",
     2.0);
-  terrain_preview_config_.min_ahead_distance_m = declare_parameter<double>(
+  terrain_preview_config_.min_ahead_distance_m = parameters.declare<double>(
     "terrain_preview_min_ahead_distance_m",
     0.75);
-  terrain_preview_config_.max_lateral_distance_m = declare_parameter<double>(
+  terrain_preview_config_.max_lateral_distance_m = parameters.declare<double>(
     "terrain_preview_max_lateral_distance_m",
     1.0);
-  terrain_preview_config_.min_label_confidence = declare_parameter<double>(
+  terrain_preview_config_.min_label_confidence = parameters.declare<double>(
     "terrain_traversal_min_label_confidence",
     terrain_accumulator_config_.min_label_confidence);
-  terrain_preview_config_.roughness_score_gate = declare_parameter<double>(
+  terrain_preview_config_.roughness_score_gate = parameters.declare<double>(
     "terrain_preview_roughness_score_gate",
     1.0);
-  terrain_preview_config_.ramp_shock_prior = declare_parameter<double>(
+  terrain_preview_config_.ramp_shock_prior = parameters.declare<double>(
     "terrain_preview_ramp_shock_prior",
     0.25);
-  terrain_preview_config_.positive_step_shock_prior = declare_parameter<double>(
+  terrain_preview_config_.positive_step_shock_prior = parameters.declare<double>(
     "terrain_preview_positive_step_shock_prior",
     1.0);
-  terrain_preview_config_.min_passage_samples = declare_parameter<int>(
+  terrain_preview_config_.min_passage_samples = parameters.declare<int>(
     "terrain_traversal_min_passage_samples",
     2);
-  terrain_preview_config_.min_passage_duration_s = declare_parameter<double>(
+  terrain_preview_config_.min_passage_duration_s = parameters.declare<double>(
     "terrain_traversal_min_passage_duration_s",
     0.05);
   terrain_preview_tracker_.configure(terrain_preview_config_);
 
-  min_scan_points_ = declare_parameter<int>("min_scan_points", 200);
-  adaptive_scan_voxel_min_points_ = declare_parameter<int>("adaptive_scan_voxel_min_points", 900);
-  registration_only_cloud_max_points_ = declare_parameter<int>(
+  min_scan_points_ = parameters.declare<int>("min_scan_points", 200);
+  adaptive_scan_voxel_min_points_ = parameters.declare<int>("adaptive_scan_voxel_min_points", 900);
+  registration_only_cloud_max_points_ = parameters.declare<int>(
     "registration_only_cloud_max_points",
     5000);
-  place_recognition_descriptor_bins_ = declare_parameter<int>(
+  place_recognition_descriptor_bins_ = parameters.declare<int>(
     "place_recognition_descriptor_bins",
     60);
-  place_recognition_descriptor_rings_ = declare_parameter<int>(
+  place_recognition_descriptor_rings_ = parameters.declare<int>(
     "place_recognition_descriptor_rings",
     1);
-  place_recognition_min_keyframes_ = declare_parameter<int>(
+  place_recognition_min_keyframes_ = parameters.declare<int>(
     "place_recognition_min_keyframes",
     25);
-  place_recognition_exclude_recent_keyframes_ = declare_parameter<int>(
+  place_recognition_exclude_recent_keyframes_ = parameters.declare<int>(
     "place_recognition_exclude_recent_keyframes",
     20);
-  place_recognition_max_candidates_ = declare_parameter<int>(
+  place_recognition_max_candidates_ = parameters.declare<int>(
     "place_recognition_max_candidates",
     4);
-  place_recognition_candidate_map_neighbors_ = declare_parameter<int>(
+  place_recognition_candidate_map_neighbors_ = parameters.declare<int>(
     "place_recognition_candidate_map_neighbors",
     6);
-  place_recognition_submap_min_consecutive_matches_ = declare_parameter<int>(
+  place_recognition_submap_min_consecutive_matches_ = parameters.declare<int>(
     "place_recognition_submap_min_consecutive_matches",
     1);
-  place_recognition_mapping_refinement_min_source_points_ = declare_parameter<int>(
+  place_recognition_mapping_refinement_min_source_points_ = parameters.declare<int>(
     "place_recognition_mapping_refinement_min_source_points",
     200);
-  place_recognition_mapping_refinement_min_target_points_ = declare_parameter<int>(
+  place_recognition_mapping_refinement_min_target_points_ = parameters.declare<int>(
     "place_recognition_mapping_refinement_min_target_points",
     1000);
   place_recognition_mapping_refinement_min_target_keyframe_observations_ =
-    declare_parameter<int>(
+    parameters.declare<int>(
     "place_recognition_mapping_refinement_min_target_keyframe_observations",
     2);
   mapping_cloud_refinement_config_.min_source_points =
     place_recognition_mapping_refinement_min_source_points_;
   mapping_cloud_refinement_config_.min_target_points =
     place_recognition_mapping_refinement_min_target_points_;
-  mapping_cloud_refinement_config_.min_observable_rank = declare_parameter<int>(
+  mapping_cloud_refinement_config_.min_observable_rank = parameters.declare<int>(
     "place_recognition_mapping_refinement_min_observable_rank",
     0);
-  pose_graph_correction_min_keyframes_ = declare_parameter<int>(
+  pose_graph_correction_min_keyframes_ = parameters.declare<int>(
     "pose_graph_correction_min_keyframes",
     5);
-  pose_graph_optimization_iterations_ = declare_parameter<int>(
+  pose_graph_optimization_iterations_ = parameters.declare<int>(
     "pose_graph_optimization_iterations",
     25);
-  pose_quarantine_tracking_reset_interval_ = declare_parameter<int>(
+  pose_quarantine_tracking_reset_interval_ = parameters.declare<int>(
     "pose_quarantine_tracking_reset_interval",
     0);
-  cloud_subscription_depth_ = declare_parameter<int>("cloud_subscription_depth", 5);
-  cloud_sync_queue_size_ = declare_parameter<int>("cloud_sync_queue_size", 10);
-  imu_subscription_depth_ = declare_parameter<int>("imu_subscription_depth", 400);
-  wheel_odom_buffer_max_samples_ = declare_parameter<int>(
+  cloud_subscription_depth_ = parameters.declare<int>("cloud_subscription_depth", 5);
+  cloud_sync_queue_size_ = parameters.declare<int>("cloud_sync_queue_size", 10);
+  imu_subscription_depth_ = parameters.declare<int>("imu_subscription_depth", 400);
+  wheel_odom_buffer_max_samples_ = parameters.declare<int>(
     "wheel_odom_buffer_max_samples",
     5000);
-  max_icp_iterations_ = declare_parameter<int>("max_icp_iterations", 40);
-  robust_registration_refinement_iterations_ = declare_parameter<int>(
+  max_icp_iterations_ = parameters.declare<int>("max_icp_iterations", 40);
+  robust_registration_refinement_iterations_ = parameters.declare<int>(
     "robust_registration_refinement_iterations",
     15);
-  max_keyframes_ = declare_parameter<int>("max_keyframes", 500);
-  max_local_keyframes_ = declare_parameter<int>("max_local_keyframes", 80);
-  submap_max_keyframes_ = declare_parameter<int>("submap_max_keyframes", 30);
-  submap_overlap_keyframes_ = declare_parameter<int>("submap_overlap_keyframes", 5);
-  max_local_submaps_ = declare_parameter<int>("max_local_submaps", 3);
-  max_path_poses_ = declare_parameter<int>("max_path_poses", 10000);
+  max_keyframes_ = parameters.declare<int>("max_keyframes", 500);
+  max_local_keyframes_ = parameters.declare<int>("max_local_keyframes", 80);
+  submap_max_keyframes_ = parameters.declare<int>("submap_max_keyframes", 30);
+  submap_overlap_keyframes_ = parameters.declare<int>("submap_overlap_keyframes", 5);
+  max_local_submaps_ = parameters.declare<int>("max_local_submaps", 3);
+  max_path_poses_ = parameters.declare<int>("max_path_poses", 10000);
 
-  surfel_config_.voxel_size = declare_parameter<double>(
+  surfel_config_.voxel_size = parameters.declare<double>(
     "surfel_voxel_size_m",
     surfel_config_.voxel_size);
   surfel_config_.min_points_per_voxel = static_cast<std::size_t>(std::max(
       0,
-      static_cast<int>(declare_parameter<int>(
+      static_cast<int>(parameters.declare<int>(
         "surfel_min_points_per_voxel",
         static_cast<int>(surfel_config_.min_points_per_voxel)))));
-  surfel_config_.max_planarity_ratio = declare_parameter<double>(
+  surfel_config_.max_planarity_ratio = parameters.declare<double>(
     "surfel_max_planarity_ratio",
     surfel_config_.max_planarity_ratio);
-  surfel_config_.min_tangent_variance = declare_parameter<double>(
+  surfel_config_.min_tangent_variance = parameters.declare<double>(
     "surfel_min_tangent_variance",
     surfel_config_.min_tangent_variance);
-  surfel_config_.max_plane_distance = declare_parameter<double>(
+  surfel_config_.max_plane_distance = parameters.declare<double>(
     "surfel_max_plane_distance_m",
     surfel_config_.max_plane_distance);
-  surfel_config_.max_center_distance = declare_parameter<double>(
+  surfel_config_.max_center_distance = parameters.declare<double>(
     "surfel_max_center_distance_m",
     surfel_config_.max_center_distance);
   surfel_config_.min_correspondences = static_cast<std::size_t>(std::max(
       0,
-      static_cast<int>(declare_parameter<int>(
+      static_cast<int>(parameters.declare<int>(
         "surfel_min_correspondences",
         static_cast<int>(surfel_config_.min_correspondences)))));
-  surfel_config_.min_correspondence_ratio = declare_parameter<double>(
+  surfel_config_.min_correspondence_ratio = parameters.declare<double>(
     "surfel_min_correspondence_ratio",
     surfel_config_.min_correspondence_ratio);
-  surfel_config_.huber_delta = declare_parameter<double>(
+  surfel_config_.huber_delta = parameters.declare<double>(
     "surfel_huber_delta_m",
     surfel_config_.huber_delta);
-  surfel_config_.max_iterations = declare_parameter<int>(
+  surfel_config_.max_iterations = parameters.declare<int>(
     "surfel_max_iterations",
     surfel_config_.max_iterations);
-  surfel_config_.max_backtracking_steps = declare_parameter<int>(
+  surfel_config_.max_backtracking_steps = parameters.declare<int>(
     "surfel_max_backtracking_steps",
     surfel_config_.max_backtracking_steps);
-  surfel_config_.backtracking_factor = declare_parameter<double>(
+  surfel_config_.backtracking_factor = parameters.declare<double>(
     "surfel_backtracking_factor",
     surfel_config_.backtracking_factor);
-  surfel_config_.rotation_convergence_rad = declare_parameter<double>(
+  surfel_config_.rotation_convergence_rad = parameters.declare<double>(
     "surfel_rotation_convergence_rad",
     surfel_config_.rotation_convergence_rad);
-  surfel_config_.translation_convergence_m = declare_parameter<double>(
+  surfel_config_.translation_convergence_m = parameters.declare<double>(
     "surfel_translation_convergence_m",
     surfel_config_.translation_convergence_m);
-  surfel_config_.relative_cost_convergence = declare_parameter<double>(
+  surfel_config_.relative_cost_convergence = parameters.declare<double>(
     "surfel_relative_cost_convergence",
     surfel_config_.relative_cost_convergence);
-  surfel_config_.max_rotation_step_rad = declare_parameter<double>(
+  surfel_config_.max_rotation_step_rad = parameters.declare<double>(
     "surfel_max_rotation_step_rad",
     surfel_config_.max_rotation_step_rad);
-  surfel_config_.max_translation_step_m = declare_parameter<double>(
+  surfel_config_.max_translation_step_m = parameters.declare<double>(
     "surfel_max_translation_step_m",
     surfel_config_.max_translation_step_m);
-  surfel_config_.rotation_scale = declare_parameter<double>(
+  surfel_config_.rotation_scale = parameters.declare<double>(
     "surfel_rotation_scale_m_per_rad",
     surfel_config_.rotation_scale);
-  surfel_config_.relative_eigen_threshold = declare_parameter<double>(
+  surfel_config_.relative_eigen_threshold = parameters.declare<double>(
     "surfel_relative_eigen_threshold",
     surfel_config_.relative_eigen_threshold);
-  surfel_config_.min_observable_rank = declare_parameter<int>(
+  surfel_config_.min_observable_rank = parameters.declare<int>(
     "surfel_min_observable_rank",
     surfel_config_.min_observable_rank);
-  surfel_config_.max_quality_rmse = declare_parameter<double>(
+  surfel_config_.max_quality_rmse = parameters.declare<double>(
     "surfel_max_quality_rmse_m",
     surfel_config_.max_quality_rmse);
-  surfel_config_.max_quality_p95 = declare_parameter<double>(
+  surfel_config_.max_quality_p95 = parameters.declare<double>(
     "surfel_max_quality_p95_m",
     surfel_config_.max_quality_p95);
+  parameters.validateConsumed();
 
-  if (
-    registration_method_ != "icp" &&
-    registration_method_ != "gicp" &&
-    registration_method_ != "voxel_surfel")
-  {
-    RCLCPP_WARN(
-      get_logger(),
-      "Unknown registration_method '%s'. Falling back to gicp.",
-      registration_method_.c_str());
-    registration_method_ = "gicp";
+  validateRegistrationOptions(registration_method_, registration_backend_options_);
+  std::string available_methods;
+  for (const auto & method : availableRegistrationMethods()) {
+    available_methods += (available_methods.empty() ? "" : ", ") + method;
   }
+  RCLCPP_INFO(
+    get_logger(), "Registration method: %s; compiled methods: %s",
+    registration_method_.c_str(), available_methods.c_str());
   const auto parsed_spatial_mode = parseMappingSpatialMode(mapping_spatial_mode_);
   if (!parsed_spatial_mode.has_value()) {
     RCLCPP_WARN(
@@ -1963,6 +2041,67 @@ void ScanToMapIcp::setupParameters()
     throw std::invalid_argument(
             "pose_graph_loop_cauchy_scale must be > 0 when robust loops are enabled");
   }
+  if (pose_graph_solver_ != "legacy_relaxation" &&
+    pose_graph_solver_ != "ceres_se3" &&
+    pose_graph_solver_ != "g2o_se3" &&
+    pose_graph_solver_ != "gtsam_se3")
+  {
+    throw std::invalid_argument(
+            "Invalid pose_graph_solver='" + pose_graph_solver_ +
+            "'; expected legacy_relaxation, ceres_se3, g2o_se3, or gtsam_se3");
+  }
+  for (const auto & backend : availablePoseGraphSolvers()) {
+    if (backend != "legacy_relaxation") {
+      pose_graph_compiled_solvers_ += "," + backend;
+    }
+  }
+  const bool nonlinear_pose_graph = pose_graph_solver_ != "legacy_relaxation";
+  if (nonlinear_pose_graph && !poseGraphSolverAvailable(pose_graph_solver_)) {
+    throw std::invalid_argument(
+            "pose_graph_solver='" + pose_graph_solver_ +
+            "' is not compiled into this build; compiled solvers: " +
+            pose_graph_compiled_solvers_ + ". No fallback is performed.");
+  }
+  if (nonlinear_pose_graph) {
+    pose_graph_optimizer_config_.backend = pose_graph_solver_;
+  }
+  if (pose_graph_information_mode_ != "configured_diagonal" &&
+    pose_graph_information_mode_ != "registration_observability")
+  {
+    throw std::invalid_argument(
+            "pose_graph_information_mode must be configured_diagonal or "
+            "registration_observability");
+  }
+  if (pose_graph_information_mode_ == "registration_observability" &&
+    !nonlinear_pose_graph)
+  {
+    throw std::invalid_argument(
+            "pose_graph_information_mode=registration_observability requires "
+            "pose_graph_solver=ceres_se3, g2o_se3, or gtsam_se3; selected " +
+            pose_graph_solver_);
+  }
+  if (!validRegistrationInformationConfig(pose_graph_information_config_)) {
+    throw std::invalid_argument("pose graph registration information configuration is invalid");
+  }
+  if (nonlinear_pose_graph && pose_graph_planar_correction_enabled_) {
+    throw std::invalid_argument(
+            "pose_graph_solver=" + pose_graph_solver_ +
+            " requires full 3D pose graph correction; set "
+            "pose_graph_planar_correction_enabled=false");
+  }
+  if (pose_graph_optimizer_config_.dcs_enabled &&
+    pose_graph_optimizer_config_.dcs_start_stage >=
+    static_cast<int>(pose_graph_optimizer_config_.robust_scale_factors.size()))
+  {
+    throw std::invalid_argument(
+            "pose_graph_ceres_dcs_start_stage must select an existing robust stage");
+  }
+  if (!validPoseGraphOptimizationConfig(pose_graph_optimizer_config_)) {
+    throw std::invalid_argument("pose graph optimizer configuration is invalid");
+  }
+  RCLCPP_INFO(
+    get_logger(), "Pose graph solver selected: %s; compiled solvers: %s",
+    pose_graph_solver_.c_str(), pose_graph_compiled_solvers_.c_str());
   if (place_recognition_submap_min_consecutive_matches_ < 1) {
     throw std::invalid_argument(
             "place_recognition_submap_min_consecutive_matches must be >= 1");
@@ -2417,6 +2556,12 @@ void ScanToMapIcp::setupRosInterfaces()
   global_map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
     global_map_topic_,
     rclcpp::QoS(1).reliable());
+  export_keyframes_service_ = create_service<std_srvs::srv::Trigger>(
+    "~/export_keyframes",
+    [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+      exportKeyframes(response);
+    });
   terrain_evidence_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
     terrain_evidence_topic_,
     rclcpp::QoS(1).reliable().transient_local());
@@ -4056,8 +4201,10 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
     require_pose_graph_validation);
   if (accepted_place_result) {
     // A strictly verified historical large-loop measurement must reach the
-    // graph unchanged. IMU/ground consistency is represented by graph factors;
-    // re-clamping here would mix the loop target with the still-drifted active pose.
+    // graph unchanged. Accepted sequential keyframes retain the frontend
+    // IMU/ground constraints, and the graph result has a post-solve ground
+    // sequence gate. Re-clamping here would mix the historical loop target
+    // with the still-drifted active pose.
     const Eigen::Isometry3d unconstrained_place_pose = result.map_T_base;
     result.place_recognition_verified_large_loop_measurement_preserved =
       shouldPreserveVerifiedLargeLoopMeasurement(
@@ -4289,6 +4436,30 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
         rejected_place_result.pose_graph_correction_keyframes;
       result.pose_graph_optimization_iterations =
         rejected_place_result.pose_graph_optimization_iterations;
+      result.pose_graph_solver_stages =
+        rejected_place_result.pose_graph_solver_stages;
+      result.pose_graph_solver_successful_steps =
+        rejected_place_result.pose_graph_solver_successful_steps;
+      result.pose_graph_solver_unsuccessful_steps =
+        rejected_place_result.pose_graph_solver_unsuccessful_steps;
+      result.pose_graph_dcs_downweighted_loop_edges =
+        rejected_place_result.pose_graph_dcs_downweighted_loop_edges;
+      result.pose_graph_registration_information_edges =
+        rejected_place_result.pose_graph_registration_information_edges;
+      result.pose_graph_configured_diagonal_information_edges =
+        rejected_place_result.pose_graph_configured_diagonal_information_edges;
+      result.pose_graph_minimum_registration_observable_rank =
+        rejected_place_result.pose_graph_minimum_registration_observable_rank;
+      result.pose_graph_maximum_registration_hessian_condition =
+        rejected_place_result.pose_graph_maximum_registration_hessian_condition;
+      result.pose_graph_minimum_registration_information_gain =
+        rejected_place_result.pose_graph_minimum_registration_information_gain;
+      result.pose_graph_new_loop_registration_information_used =
+        rejected_place_result.pose_graph_new_loop_registration_information_used;
+      result.pose_graph_new_loop_information_status =
+        rejected_place_result.pose_graph_new_loop_information_status;
+      result.pose_graph_new_loop_information_min_gain =
+        rejected_place_result.pose_graph_new_loop_information_min_gain;
       result.pose_graph_optimization_runtime_ms =
         rejected_place_result.pose_graph_optimization_runtime_ms;
       result.pose_graph_iteration_runtime_ms =
@@ -4296,6 +4467,11 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
       result.pose_graph_mean_iteration_runtime_ms =
         rejected_place_result.pose_graph_mean_iteration_runtime_ms;
       result.pose_graph_solver_status = rejected_place_result.pose_graph_solver_status;
+      result.pose_graph_solver_backend = rejected_place_result.pose_graph_solver_backend;
+      result.pose_graph_solver_gradient_available =
+        rejected_place_result.pose_graph_solver_gradient_available;
+      result.pose_graph_solver_step_counts_available =
+        rejected_place_result.pose_graph_solver_step_counts_available;
       result.pose_graph_convergence_reason =
         rejected_place_result.pose_graph_convergence_reason;
       result.pose_graph_edges = rejected_place_result.pose_graph_edges;
@@ -4316,6 +4492,16 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
         rejected_place_result.pose_graph_min_loop_robust_weight;
       result.pose_graph_new_loop_robust_weight =
         rejected_place_result.pose_graph_new_loop_robust_weight;
+      result.pose_graph_dcs_min_scale =
+        rejected_place_result.pose_graph_dcs_min_scale;
+      result.pose_graph_new_loop_dcs_scale =
+        rejected_place_result.pose_graph_new_loop_dcs_scale;
+      result.pose_graph_solver_first_stage_initial_cost =
+        rejected_place_result.pose_graph_solver_first_stage_initial_cost;
+      result.pose_graph_solver_last_stage_final_cost =
+        rejected_place_result.pose_graph_solver_last_stage_final_cost;
+      result.pose_graph_solver_final_gradient_max_norm =
+        rejected_place_result.pose_graph_solver_final_gradient_max_norm;
       result.pose_graph_max_update_translation_m =
         rejected_place_result.pose_graph_max_update_translation_m;
       result.pose_graph_max_update_rotation_deg =
@@ -4568,6 +4754,7 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
 
   if (shouldAddKeyframe(map_T_base_)) {
     if (!result.shock_quarantined) {
+      attachRegistrationInformation(scan_base, local_map, result);
       addKeyframe(
         scan_base,
         mapping_scan_base,
@@ -4575,7 +4762,8 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
         terrain_sensor_scans,
         stamp,
         gravity_sample,
-        gravity_sample_stale);
+        gravity_sample_stale,
+        &result);
       result.keyframe_added = true;
     } else {
       result.keyframe_quarantined = true;
@@ -4608,6 +4796,11 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
   registration_only_stats = RegistrationOnlyCloudStats{};
   terrain_sensor_scans.clear();
   uncompensated_terrain_sensor_scans.clear();
+  const bool preserve_sensor_views =
+    terrain_config_.enabled || !keyframe_archive_directory_.empty();
+  const double sensor_view_voxel_leaf_m = terrain_config_.enabled ?
+    terrain_config_.classification_voxel_size_m :
+    keyframe_archive_voxel_leaf_m_;
   Eigen::Vector3d primary_origin_base = Eigen::Vector3d::Zero();
   auto primary = convertAndTransformCloud(
     *cloud_set.primary,
@@ -4620,12 +4813,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
   ++merged_cloud_count;
   auto mapping_merged = std::make_shared<CloudT>(*primary);
   auto registration_only_merged = std::make_shared<CloudT>();
-  if (terrain_config_.enabled) {
+  if (preserve_sensor_views) {
     terrain_sensor_scans.push_back(
       TerrainSensorScan{
           downsampleCloud(
             filterCloud(primary),
-            terrain_config_.classification_voxel_size_m),
+            sensor_view_voxel_leaf_m),
           primary_origin_base,
           {},
           {}});
@@ -4635,12 +4828,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
   if (build_uncompensated_hypothesis) {
     uncompensated_mapping_merged = std::make_shared<CloudT>(*primary);
     uncompensated_registration_only_merged = std::make_shared<CloudT>();
-    if (terrain_config_.enabled) {
+    if (preserve_sensor_views) {
       uncompensated_terrain_sensor_scans.push_back(
         TerrainSensorScan{
             downsampleCloud(
               filterCloud(primary),
-              terrain_config_.classification_voxel_size_m),
+              sensor_view_voxel_leaf_m),
             primary_origin_base,
             {},
             {}});
@@ -4690,12 +4883,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
     } else {
       *mapping_merged += *auxiliary;
     }
-    if (!registration_only && terrain_config_.enabled) {
+    if (!registration_only && preserve_sensor_views) {
       terrain_sensor_scans.push_back(
         TerrainSensorScan{
             downsampleCloud(
               filterCloud(auxiliary),
-              terrain_config_.classification_voxel_size_m),
+              sensor_view_voxel_leaf_m),
             auxiliary_origin_base,
             {},
             {}});
@@ -4706,12 +4899,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
       } else {
         *uncompensated_mapping_merged += *uncompensated_auxiliary;
       }
-      if (!registration_only && terrain_config_.enabled) {
+      if (!registration_only && preserve_sensor_views) {
         uncompensated_terrain_sensor_scans.push_back(
           TerrainSensorScan{
               downsampleCloud(
                 filterCloud(uncompensated_auxiliary),
-                terrain_config_.classification_voxel_size_m),
+                sensor_view_voxel_leaf_m),
               uncompensated_auxiliary_origin_base,
               {},
               {}});
@@ -6642,6 +6835,14 @@ ScanToMapIcp::RegistrationResult ScanToMapIcp::registerScanToMap(
     result.surfel_hessian_eigenvalues = surfel_result.hessian_eigenvalues;
     result.surfel_weak_rotation_axes = surfel_result.weak_rotation_axes;
     result.surfel_weak_translation_axes = surfel_result.weak_translation_axes;
+    result.registration_information_valid = surfel_result.hessian_valid;
+    result.registration_information_observable_rank = surfel_result.observable_rank;
+    result.registration_information_hessian_condition = surfel_result.hessian_condition;
+    result.registration_information_evaluation_runtime_ms = surfel_result.total_time_ms;
+    result.registration_information_hessian_map_rt = surfel_result.physical_hessian;
+    result.registration_information_pose_map_T_base = surfel_result.target_T_source;
+    result.registration_information_status = surfel_result.hessian_valid ?
+      "voxel_surfel_alignment" : "voxel_surfel_" + surfel_result.reason;
     result.map_T_base = surfel_result.target_T_source;
     result.iterations = surfel_result.iterations;
     result.registration_coarse_iterations = surfel_result.iterations;
@@ -6718,39 +6919,19 @@ ScanToMapIcp::RegistrationResult ScanToMapIcp::registerScanToMap(
       stage_result.fitness = std::numeric_limits<double>::infinity();
       stage_result.registration_quality_max_correspondence_m =
         quality_max_correspondence_m;
-      CloudT aligned;
-
-      if (registration_method_ == "icp") {
-        pcl::IterativeClosestPoint<PointT, PointT> icp;
-        icp.setInputSource(scan_base);
-        icp.setInputTarget(local_map);
-        icp.setMaximumIterations(std::max(1, max_iterations));
-        icp.setMaxCorrespondenceDistance(std::max(1.0e-3, max_correspondence_m));
-        if (use_trimmed) {
-          pcl::registration::CorrespondenceRejectorTrimmed::Ptr trimmed_rejector(
-            new pcl::registration::CorrespondenceRejectorTrimmed());
-          trimmed_rejector->setOverlapRatio(static_cast<float>(trim_ratio));
-          trimmed_rejector->setMinCorrespondences(
-            static_cast<unsigned int>(std::max(3, min_scan_points_)));
-          icp.addCorrespondenceRejector(trimmed_rejector);
-        }
-        icp.align(aligned, guess);
-        stage_result.converged = icp.hasConverged();
-        stage_result.fitness = icp.getFitnessScore(quality_max_correspondence_m);
-        stage_result.iterations = icp.nr_iterations_;
-        stage_result.map_T_base.matrix() = icp.getFinalTransformation().cast<double>();
-      } else {
-        pcl::GeneralizedIterativeClosestPoint<PointT, PointT> gicp;
-        gicp.setInputSource(scan_base);
-        gicp.setInputTarget(local_map);
-        gicp.setMaximumIterations(std::max(1, max_iterations));
-        gicp.setMaxCorrespondenceDistance(std::max(1.0e-3, max_correspondence_m));
-        gicp.align(aligned, guess);
-        stage_result.converged = gicp.hasConverged();
-        stage_result.fitness = gicp.getFitnessScore(quality_max_correspondence_m);
-        stage_result.iterations = gicp.nr_iterations_;
-        stage_result.map_T_base.matrix() = gicp.getFinalTransformation().cast<double>();
-      }
+      auto options = registration_backend_options_;
+      options.max_iterations = std::max(1, max_iterations);
+      options.max_correspondence_m = std::max(1.0e-3, max_correspondence_m);
+      options.quality_max_correspondence_m = quality_max_correspondence_m;
+      options.use_trimmed = use_trimmed;
+      options.trim_ratio = trim_ratio;
+      options.min_correspondences = std::max(3, min_scan_points_);
+      const auto aligned_result = alignRegistration(
+        registration_method_, scan_base, local_map, guess, options);
+      stage_result.converged = aligned_result.converged;
+      stage_result.fitness = aligned_result.fitness;
+      stage_result.iterations = aligned_result.iterations;
+      stage_result.map_T_base.matrix() = aligned_result.target_T_source.cast<double>();
 
       const Eigen::Matrix3d linear = stage_result.map_T_base.linear();
       stage_result.transform_determinant = linear.determinant();
@@ -6764,7 +6945,7 @@ ScanToMapIcp::RegistrationResult ScanToMapIcp::registerScanToMap(
         0.0,
         registration_scan_gap_s);
       evaluateRegistrationOverlap(
-        aligned,
+        aligned_result.aligned,
         local_map,
         quality_max_correspondence_m,
         stage_result);
@@ -6787,7 +6968,10 @@ ScanToMapIcp::RegistrationResult ScanToMapIcp::registerScanToMap(
     robust_registration_refinement_max_correspondence_m_,
     1.0e-3,
     coarse_max_correspondence_m);
-  const bool refinement_configured = robust_registration_enabled_ &&
+  // NDT searches voxel distributions, not distance-gated point correspondences.
+  // Repeating it with a smaller ICP correspondence limit would not refine its objective.
+  const bool refinement_configured = registration_method_ != "ndt" &&
+    robust_registration_enabled_ &&
     robust_registration_refinement_iterations_ > 0 &&
     refinement_max_correspondence_m + 1.0e-6 < coarse_max_correspondence_m;
   const bool coarse_transform_valid = result.converged && result.map_T_base.matrix().allFinite();
@@ -6834,6 +7018,53 @@ ScanToMapIcp::RegistrationResult ScanToMapIcp::registerScanToMap(
   refined_result.iterations =
     result.registration_coarse_iterations + result.registration_refinement_iterations;
   return refined_result;
+}
+
+void ScanToMapIcp::attachRegistrationInformation(
+  const CloudConstPtr & source,
+  const CloudConstPtr & target,
+  RegistrationResult & result) const
+{
+  if (pose_graph_information_mode_ != "registration_observability") {
+    result.registration_information_status = "configured_diagonal_mode";
+    return;
+  }
+  if (result.registration_information_valid &&
+    result.registration_information_hessian_map_rt.allFinite() &&
+    result.registration_information_pose_map_T_base.matrix().isApprox(
+      result.map_T_base.matrix(), 1.0e-9))
+  {
+    // Voxel-surfel already evaluates its final robust Hessian after the last
+    // accepted step. Rebuilding the same target model at every keyframe only
+    // adds callback latency. A pose changed by a later motion constraint still
+    // falls through to an exact fixed-pose re-evaluation below.
+    result.registration_information_evaluation_runtime_ms = 0.0;
+    result.registration_information_status = "reused_registration_linearization";
+    return;
+  }
+  result.registration_information_valid = false;
+  result.registration_information_observable_rank = 0;
+  result.registration_information_hessian_condition = 0.0;
+  result.registration_information_evaluation_runtime_ms = 0.0;
+  result.registration_information_hessian_map_rt.setZero();
+  result.registration_information_pose_map_T_base = result.map_T_base;
+  if (!source || source->empty() || !target || target->empty() ||
+    !result.map_T_base.matrix().allFinite())
+  {
+    result.registration_information_status = "invalid_fixed_pose_inputs";
+    return;
+  }
+
+  const VoxelSurfelRegistration evaluator(surfel_config_);
+  const auto estimate = evaluator.evaluateAtPose(*source, *target, result.map_T_base);
+  result.registration_information_valid = estimate.hessian_valid;
+  result.registration_information_observable_rank = estimate.observable_rank;
+  result.registration_information_hessian_condition = estimate.hessian_condition;
+  result.registration_information_evaluation_runtime_ms = estimate.total_time_ms;
+  result.registration_information_hessian_map_rt = estimate.physical_hessian;
+  result.registration_information_pose_map_T_base = result.map_T_base;
+  result.registration_information_status =
+    "fixed_pose_point_to_plane_" + estimate.reason;
 }
 
 void ScanToMapIcp::evaluateRegistrationOverlap(
@@ -7135,14 +7366,80 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildCandidateMappingMapAroundSubmap(
   return downsampleCloud(candidate_map, map_voxel_leaf_m_);
 }
 
+void ScanToMapIcp::archiveLoopCandidate(
+  const CloudConstPtr & source_base,
+  const CloudConstPtr & target_map,
+  const rclcpp::Time & stamp,
+  const Eigen::Isometry3d & reference_pose,
+  const Eigen::Isometry3d & coarse_pose,
+  const std::optional<Eigen::Isometry3d> & proposed_pose,
+  const RegistrationResult & result)
+{
+  if (loop_candidate_archive_directory_.empty() ||
+    loop_candidate_archive_attempts_ >=
+    static_cast<std::uint64_t>(loop_candidate_archive_max_count_))
+  {
+    return;
+  }
+  // Count failed writes too, so an unavailable disk cannot cause unbounded retries.
+  const auto sequence = loop_candidate_archive_attempts_++;
+  try {
+    LoopCandidateArchive archive;
+    archive.map_frame = map_frame_;
+    archive.base_frame = base_frame_;
+    archive.stamp_ns = stamp.nanoseconds();
+    archive.candidate_keyframe_index = result.place_recognition_candidate_index;
+    archive.candidate_submap_id = result.place_recognition_candidate_submap_id;
+    archive.reference_map_T_base = reference_pose;
+    archive.coarse_map_T_base = coarse_pose;
+    archive.refined_map_T_base = proposed_pose;
+    archive.source_base = source_base;
+    archive.target_map = target_map;
+    archive.diagnostics = {
+      {"status", result.place_recognition_mapping_refinement_status},
+      {"refinement_applied", toString(result.place_recognition_mapping_refinement_applied)},
+      {"refinement_verified", toString(result.place_recognition_mapping_refinement_verified)},
+      {"large_jump_provisional", toString(result.place_recognition_large_pose_jump_provisional)},
+      {"descriptor_distance", toString(result.place_recognition_descriptor_distance)},
+      {"before_inlier_ratio", toString(
+          result.place_recognition_mapping_refinement_before_inlier_ratio)},
+      {"after_inlier_ratio",
+        toString(result.place_recognition_mapping_refinement_after_inlier_ratio)},
+      {"before_rmse_m", toString(result.place_recognition_mapping_refinement_before_inlier_rmse_m)},
+      {"after_rmse_m", toString(result.place_recognition_mapping_refinement_after_inlier_rmse_m)},
+      {"before_target_coverage", toString(
+          result.place_recognition_mapping_refinement_before_target_coverage_ratio)},
+      {"after_target_coverage", toString(
+          result.place_recognition_mapping_refinement_after_target_coverage_ratio)},
+      {"observable_rank", toString(result.place_recognition_mapping_refinement_observable_rank)},
+      {"hessian_condition",
+        toString(result.place_recognition_mapping_refinement_hessian_condition)},
+      {"quality_correspondence_m", toString(
+          place_recognition_mapping_refinement_quality_max_correspondence_m_)},
+      {"runtime_ms", toString(result.place_recognition_mapping_refinement_runtime_ms)}
+    };
+    const auto directory = std::filesystem::path(loop_candidate_archive_directory_) /
+      ("candidate_" + std::to_string(sequence) + "_" + std::to_string(archive.stamp_ns));
+    writeLoopCandidateArchive(directory.string(), archive);
+    ++loop_candidate_archive_saved_;
+  } catch (const std::exception & error) {
+    ++loop_candidate_archive_failed_;
+    RCLCPP_WARN(get_logger(), "Loop candidate evidence was not saved: %s", error.what());
+  }
+}
+
 void ScanToMapIcp::refinePlaceRecognitionWithMappingCloud(
   const CloudConstPtr & registration_scan_base,
   const CloudConstPtr & mapping_scan_base,
   const CloudConstPtr & registration_candidate_map,
   const CloudConstPtr & mapping_candidate_map,
   const Eigen::Isometry3d & candidate_seed_pose,
-  RegistrationResult & result) const
+  RegistrationResult & result,
+  std::optional<Eigen::Isometry3d> * proposed_pose) const
 {
+  if (proposed_pose) {
+    proposed_pose->reset();
+  }
   result.place_recognition_mapping_refinement_status =
     place_recognition_mapping_cloud_refinement_enabled_ ? "not_attempted" : "disabled";
   result.place_recognition_mapping_refinement_applied = false;
@@ -7232,6 +7529,10 @@ void ScanToMapIcp::refinePlaceRecognitionWithMappingCloud(
 
   RegistrationResult refined = registerScanToMap(
     mapping_scan_base, mapping_candidate_map, coarse_pose);
+  if (proposed_pose) {
+    *proposed_pose = refined.map_T_base;
+  }
+  attachRegistrationInformation(mapping_scan_base, mapping_candidate_map, refined);
   const RegistrationResult mapping_after = quality_at_pose(
     mapping_scan_base, mapping_candidate_map, refined.map_T_base);
   const RegistrationResult mapping_reverse_after = quality_at_pose(
@@ -7285,6 +7586,18 @@ void ScanToMapIcp::refinePlaceRecognitionWithMappingCloud(
   result.iterations += refined.iterations;
   result.transform_determinant = primary_after.transform_determinant;
   result.transform_orthogonality_error = primary_after.transform_orthogonality_error;
+  result.registration_information_valid = refined.registration_information_valid;
+  result.registration_information_observable_rank =
+    refined.registration_information_observable_rank;
+  result.registration_information_hessian_condition =
+    refined.registration_information_hessian_condition;
+  result.registration_information_evaluation_runtime_ms =
+    refined.registration_information_evaluation_runtime_ms;
+  result.registration_information_hessian_map_rt =
+    refined.registration_information_hessian_map_rt;
+  result.registration_information_pose_map_T_base =
+    refined.registration_information_pose_map_T_base;
+  result.registration_information_status = refined.registration_information_status;
   const Eigen::Isometry3d seed_delta = projectToRigidIsometry(
     candidate_seed_pose.inverse() * result.map_T_base);
   result.correction_translation_m = seed_delta.translation().norm();
@@ -7331,7 +7644,8 @@ void ScanToMapIcp::addKeyframe(
   const std::vector<TerrainSensorScan> & terrain_sensor_scans,
   const rclcpp::Time & stamp,
   const std::optional<GravitySample> & gravity_sample,
-  const bool gravity_sample_stale)
+  const bool gravity_sample_stale,
+  const RegistrationResult * registration_result)
 {
   const int new_keyframe_index = static_cast<int>(keyframes_.size());
   if (new_keyframe_index > 0) {
@@ -7343,23 +7657,60 @@ void ScanToMapIcp::addKeyframe(
     odom_edge.translation_weight = std::max(0.0, pose_graph_odom_translation_weight_);
     odom_edge.vertical_translation_weight = odom_edge.translation_weight;
     odom_edge.rotation_weight = std::max(0.0, pose_graph_odom_rotation_weight_);
+    Vector6d configured_information;
+    configured_information <<
+      odom_edge.translation_weight,
+      odom_edge.translation_weight,
+      odom_edge.vertical_translation_weight,
+      odom_edge.rotation_weight,
+      odom_edge.rotation_weight,
+      odom_edge.rotation_weight;
+    odom_edge.information_matrix = configuredDiagonalInformation(configured_information);
+    if (pose_graph_information_mode_ == "registration_observability" &&
+      registration_result != nullptr && registration_result->registration_information_valid)
+    {
+      const RegistrationInformationResult information =
+        registrationHessianToPoseGraphInformation(
+        registration_result->registration_information_hessian_map_rt,
+        previous.map_T_base,
+        configured_information,
+        pose_graph_information_config_);
+      if (information.valid) {
+        odom_edge.information_matrix = information.information_matrix;
+        odom_edge.registration_information_used = true;
+        odom_edge.registration_observable_rank = information.observable_rank;
+        odom_edge.registration_hessian_condition = information.observable_condition;
+        odom_edge.registration_information_min_gain =
+          information.minimum_information_gain;
+      }
+    }
     odom_edge.loop_closure = false;
     pose_graph_edges_.push_back(odom_edge);
   }
 
   Keyframe keyframe;
+  keyframe.archive_id = next_keyframe_archive_id_++;
   keyframe.stamp = stamp;
   keyframe.map_T_base = map_T_base_;
   keyframe.cloud_base = downsampleCloud(registration_scan_base, map_voxel_leaf_m_);
   keyframe.mapping_cloud_base = downsampleCloud(mapping_scan_base, map_voxel_leaf_m_);
-  if (terrain_config_.enabled) {
+  if (terrain_config_.enabled || !keyframe_archive_directory_.empty()) {
     keyframe.terrain_sensor_scans = terrain_sensor_scans;
+    const double sensor_view_voxel_leaf_m = terrain_config_.enabled ?
+      terrain_config_.classification_voxel_size_m :
+      keyframe_archive_voxel_leaf_m_;
     for (auto & sensor_scan : keyframe.terrain_sensor_scans) {
       sensor_scan.cloud_base = downsampleCloud(
         sensor_scan.cloud_base,
-        terrain_config_.classification_voxel_size_m);
+        sensor_view_voxel_leaf_m);
       sensor_scan.labels.clear();
       sensor_scan.roughness_scores.clear();
+    }
+    if (!keyframe_archive_directory_.empty()) {
+      keyframe.archive_sensor_scans = keyframe.terrain_sensor_scans;
+    }
+    if (!terrain_config_.enabled) {
+      keyframe.terrain_sensor_scans.clear();
     }
   }
   keyframe.cloud_map = filterMapCloud(transformCloud(keyframe.cloud_base, map_T_base_));
@@ -7378,6 +7729,7 @@ void ScanToMapIcp::addKeyframe(
   bool pruned_oldest_keyframe = false;
   if (static_cast<int>(keyframes_.size()) > max_keyframes_) {
     keyframes_.erase(keyframes_.begin());
+    ++pruned_keyframe_count_;
     prunePoseGraphEdgesAfterOldestKeyframeRemoval();
     pruneTerrainTraversalSamplesAfterOldestKeyframeRemoval();
     pruneSubmapsAfterOldestKeyframeRemoval();
@@ -8895,6 +9247,8 @@ bool ScanToMapIcp::tryPlaceRecognition(
     return false;
   }
 
+  attachRegistrationInformation(scan_base, best_candidate_map, best_result);
+
   // Rank candidates using one comparable coarse-registration score, then
   // refine only the selected candidate. Refining inside the candidate loop
   // adds hidden callback latency and mixes backend fitness definitions.
@@ -8905,13 +9259,19 @@ bool ScanToMapIcp::tryPlaceRecognition(
       buildCandidateMappingMapAroundKeyframe(
       best_result.place_recognition_candidate_index,
       latest_candidate_exclusive);
+    const Eigen::Isometry3d coarse_pose = best_result.map_T_base;
+    std::optional<Eigen::Isometry3d> proposed_pose;
     refinePlaceRecognitionWithMappingCloud(
       scan_base,
       mapping_scan_base,
       best_candidate_map,
       mapping_candidate_map,
       best_candidate_seed_pose,
-      best_result);
+      best_result,
+      &proposed_pose);
+    archiveLoopCandidate(
+      mapping_scan_base, mapping_candidate_map, stamp, reference_pose,
+      coarse_pose, proposed_pose, best_result);
 
     const bool mapping_verification_required =
       best_result.place_recognition_large_pose_jump_provisional ||
@@ -9103,26 +9463,18 @@ double ScanToMapIcp::poseGraphEdgeSquaredError(
   const PoseGraphEdge & edge,
   const std::vector<Eigen::Isometry3d> & poses) const
 {
-  if (edge.from_index < 0 || edge.to_index < 0 ||
-    edge.from_index >= static_cast<int>(poses.size()) ||
-    edge.to_index >= static_cast<int>(poses.size()))
-  {
-    return std::numeric_limits<double>::infinity();
-  }
+  return poseGraphConstraintChiSquared(poseGraphConstraintFromEdge(edge), poses);
+}
 
-  const auto & from = poses[static_cast<std::size_t>(edge.from_index)];
-  const auto & to = poses[static_cast<std::size_t>(edge.to_index)];
-  const Eigen::Isometry3d expected_to = from * edge.from_T_to;
-  const Eigen::Isometry3d error = expected_to.inverse() * to;
-  const double translation_weight = std::max(0.0, edge.translation_weight);
-  const double vertical_translation_weight =
-    std::max(0.0, edge.vertical_translation_weight);
-  const double rotation_weight = std::max(0.0, edge.rotation_weight);
-  const double rotation_rad = rotationAngleDeg(error.linear()) * M_PI / 180.0;
-  return weightedMapTranslationSquaredError(
-    expected_to.translation(), to.translation(),
-    translation_weight, vertical_translation_weight) +
-         rotation_weight * rotation_rad * rotation_rad;
+PoseGraphConstraint ScanToMapIcp::poseGraphConstraintFromEdge(const PoseGraphEdge & edge)
+{
+  PoseGraphConstraint constraint;
+  constraint.from_index = edge.from_index;
+  constraint.to_index = edge.to_index;
+  constraint.from_T_to = edge.from_T_to;
+  constraint.information_matrix = edge.information_matrix;
+  constraint.loop_closure = edge.loop_closure;
+  return constraint;
 }
 
 double ScanToMapIcp::poseGraphLoopRobustWeight(
@@ -9169,7 +9521,8 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
   const std::vector<Eigen::Isometry3d> & previous_keyframe_poses,
   const bool same_layer_z_constraint,
   const double loop_vertical_translation_weight,
-  const bool distributed_loop_seed)
+  const bool distributed_loop_seed,
+  const RegistrationInformationResult * registration_information)
 {
   const auto optimization_started = std::chrono::steady_clock::now();
   PoseGraphStats stats;
@@ -9178,6 +9531,12 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
     const std::string & convergence_reason) -> PoseGraphStats
     {
       stats.solver_status = solver_status;
+      if (solver_status == "accepted" || solver_status == "rejected" ||
+        solver_status == "failed")
+      {
+        stats.solver_status += "_" + (stats.solver_backend == "not_run" ?
+          pose_graph_solver_ : stats.solver_backend);
+      }
       stats.convergence_reason = convergence_reason;
       stats.optimization_runtime_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - optimization_started).count();
@@ -9205,6 +9564,23 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
   loop_edge.vertical_translation_weight = std::max(
     0.0, loop_vertical_translation_weight);
   loop_edge.rotation_weight = std::max(0.0, pose_graph_loop_rotation_weight_);
+  Vector6d configured_loop_information;
+  configured_loop_information <<
+    loop_edge.translation_weight,
+    loop_edge.translation_weight,
+    loop_edge.vertical_translation_weight,
+    loop_edge.rotation_weight,
+    loop_edge.rotation_weight,
+    loop_edge.rotation_weight;
+  loop_edge.information_matrix = configuredDiagonalInformation(configured_loop_information);
+  if (registration_information != nullptr && registration_information->valid) {
+    loop_edge.information_matrix = registration_information->information_matrix;
+    loop_edge.registration_information_used = true;
+    loop_edge.registration_observable_rank = registration_information->observable_rank;
+    loop_edge.registration_hessian_condition = registration_information->observable_condition;
+    loop_edge.registration_information_min_gain =
+      registration_information->minimum_information_gain;
+  }
   loop_edge.loop_closure = true;
   pose_graph_edges_.push_back(loop_edge);
 
@@ -9214,8 +9590,30 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
       stats.edges = static_cast<int>(pose_graph_edges_.size());
       stats.loop_edges = 0;
       stats.robust_loop_edges_downweighted = 0;
+      stats.registration_information_edges = 0;
+      stats.configured_diagonal_information_edges = 0;
+      stats.minimum_registration_observable_rank = 0;
+      stats.maximum_registration_hessian_condition = 0.0;
+      stats.minimum_registration_information_gain = 1.0;
       stats.min_loop_robust_weight = 1.0;
+      bool have_registration_information = false;
       for (const auto & edge : pose_graph_edges_) {
+        if (edge.registration_information_used) {
+          ++stats.registration_information_edges;
+          stats.maximum_registration_hessian_condition = std::max(
+            stats.maximum_registration_hessian_condition,
+            edge.registration_hessian_condition);
+          stats.minimum_registration_information_gain = std::min(
+            stats.minimum_registration_information_gain,
+            edge.registration_information_min_gain);
+          stats.minimum_registration_observable_rank = have_registration_information ?
+            std::min(
+            stats.minimum_registration_observable_rank,
+            edge.registration_observable_rank) : edge.registration_observable_rank;
+          have_registration_information = true;
+        } else {
+          ++stats.configured_diagonal_information_edges;
+        }
         if (!edge.loop_closure) {
           continue;
         }
@@ -9322,113 +9720,183 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
 
   std::string convergence_reason = "max_iterations";
   const auto iteration_started = std::chrono::steady_clock::now();
-  for (int iteration = 0; iteration < max_iterations; ++iteration) {
-    double iteration_max_translation = 0.0;
-    double iteration_max_rotation = 0.0;
-
+  if (pose_graph_solver_ != "legacy_relaxation") {
+    std::vector<PoseGraphConstraint> constraints;
+    constraints.reserve(pose_graph_edges_.size());
     for (const auto & edge : pose_graph_edges_) {
-      if (edge.from_index < 0 || edge.to_index < 0 ||
-        edge.from_index >= static_cast<int>(poses.size()) ||
-        edge.to_index >= static_cast<int>(poses.size()))
-      {
-        continue;
-      }
-
-      const int from_index = edge.from_index;
-      const int to_index = edge.to_index;
-      const Eigen::Isometry3d expected_to =
-        poses[static_cast<std::size_t>(from_index)] * edge.from_T_to;
-      Eigen::Isometry3d correction =
-        projectToRigidIsometry(
-        expected_to * poses[static_cast<std::size_t>(to_index)].inverse());
-      if (pose_graph_planar_correction_enabled_) {
-        correction = planarizeCorrection(correction);
-      }
-
-      const double to_share = from_index == 0 ? 1.0 : 0.5;
-      const double from_share = to_index == 0 ? 1.0 : 0.5;
-      const double robust_weight = poseGraphLoopRobustWeight(
-        edge,
-        poseGraphEdgeSquaredError(edge, poses));
-      const double translation_step =
-        std::clamp(
-        base_step * std::max(0.0, edge.translation_weight) * robust_weight,
-        0.0,
-        1.0);
-      const double vertical_translation_step =
-        std::clamp(
-        base_step * std::max(0.0, edge.vertical_translation_weight) * robust_weight,
-        0.0,
-        1.0);
-      const double rotation_step =
-        std::clamp(
-        base_step * std::max(0.0, edge.rotation_weight) * robust_weight,
-        0.0,
-        1.0);
-
-      if (to_index > 0) {
-        Eigen::Isometry3d to_correction = interpolateTransform(
-          correction,
-          translation_step * to_share,
-          rotation_step * to_share);
-        to_correction.translation().z() =
-          correction.translation().z() * vertical_translation_step * to_share;
-        to_correction = limitCorrectionStep(
-          to_correction,
-          max_translation_step,
-          max_rotation_step);
-        iteration_max_translation = std::max(
-          iteration_max_translation,
-          to_correction.translation().norm());
-        iteration_max_rotation = std::max(
-          iteration_max_rotation,
-          rotationAngleDeg(to_correction.linear()));
-        poses[static_cast<std::size_t>(to_index)] =
-          projectToRigidIsometry(
-          to_correction * poses[static_cast<std::size_t>(to_index)]);
-      }
-
-      if (from_index > 0) {
-        const Eigen::Isometry3d inverse_correction = correction.inverse();
-        Eigen::Isometry3d from_correction = interpolateTransform(
-          inverse_correction,
-          translation_step * from_share,
-          rotation_step * from_share);
-        from_correction.translation().z() =
-          inverse_correction.translation().z() *
-          vertical_translation_step * from_share;
-        from_correction = limitCorrectionStep(
-          from_correction,
-          max_translation_step,
-          max_rotation_step);
-        iteration_max_translation = std::max(
-          iteration_max_translation,
-          from_correction.translation().norm());
-        iteration_max_rotation = std::max(
-          iteration_max_rotation,
-          rotationAngleDeg(from_correction.linear()));
-        poses[static_cast<std::size_t>(from_index)] =
-          projectToRigidIsometry(
-          from_correction * poses[static_cast<std::size_t>(from_index)]);
-      }
+      constraints.push_back(poseGraphConstraintFromEdge(edge));
     }
 
+    const std::vector<Eigen::Isometry3d> poses_before_solver = poses;
+    const PoseGraphOptimizationResult optimization =
+      PoseGraphOptimizer(pose_graph_optimizer_config_).optimize(poses, constraints);
+    stats.solver_backend = optimization.backend;
+    stats.solver_stages = static_cast<int>(optimization.stages.size());
+    // The gradient is a last-stage value; counters aggregate every stage.
+    stats.solver_gradient_available = !optimization.stages.empty() &&
+      optimization.stages.back().gradient_available;
+    stats.solver_step_counts_available = !optimization.stages.empty() &&
+      std::all_of(
+      optimization.stages.begin(), optimization.stages.end(),
+      [](const PoseGraphOptimizationStageStats & stage) {
+        return stage.step_counts_available;
+      });
+    stats.solver_successful_steps = optimization.successful_steps;
+    stats.solver_unsuccessful_steps = optimization.unsuccessful_steps;
+    stats.dcs_downweighted_loop_edges = optimization.dcs_downweighted_loops;
+    stats.dcs_min_scale = optimization.min_dcs_scale;
+    stats.solver_first_stage_initial_cost = optimization.initial_cost;
+    stats.solver_last_stage_final_cost = optimization.final_cost;
+    stats.solver_final_gradient_max_norm = optimization.final_gradient_max_norm;
+    stats.iterations = optimization.total_iterations;
+    stats.iteration_runtime_ms = optimization.runtime_ms;
+    stats.mean_iteration_runtime_ms = optimization.runtime_ms /
+      static_cast<double>(std::max(1, stats.iterations));
+    convergence_reason = stats.solver_backend + "_" + optimization.termination_type;
+    if (!optimization.success) {
+      reject_new_loop(optimization.failure_reason);
+      stats.residual_after = poseGraphResidual(previous_keyframe_poses, false);
+      stats.robust_objective_after = poseGraphResidual(previous_keyframe_poses, true);
+      return finalize("failed", convergence_reason);
+    }
+    if (optimization.final_dcs_scales.size() == constraints.size()) {
+      stats.new_loop_dcs_scale = optimization.final_dcs_scales.back();
+    }
+    if (pose_graph_optimizer_config_.dcs_enabled &&
+      stats.new_loop_dcs_scale < min_new_loop_robust_weight)
+    {
+      reject_new_loop("new_loop_dcs_scale");
+      stats.residual_after = poseGraphResidual(previous_keyframe_poses, false);
+      stats.robust_objective_after = poseGraphResidual(previous_keyframe_poses, true);
+      return finalize("rejected", "dcs_outlier_gate");
+    }
+
+    poses = optimization.poses;
+    for (std::size_t index = 0; index < poses.size(); ++index) {
+      stats.max_update_translation_m = std::max(
+        stats.max_update_translation_m,
+        (poses[index].translation() - poses_before_solver[index].translation()).norm());
+      const Eigen::Matrix3d rotation_delta =
+        poses_before_solver[index].linear().transpose() * poses[index].linear();
+      stats.max_update_rotation_deg = std::max(
+        stats.max_update_rotation_deg,
+        rotationAngleDeg(rotation_delta));
+    }
     const double objective = poseGraphResidual(poses, true);
-    if (objective < best_objective) {
+    if (std::isfinite(objective) && objective < best_objective) {
       best_objective = objective;
       best_poses = poses;
     }
-    stats.max_update_translation_m = std::max(
-      stats.max_update_translation_m,
-      iteration_max_translation);
-    stats.max_update_rotation_deg = std::max(
-      stats.max_update_rotation_deg,
-      iteration_max_rotation);
-    stats.iterations = iteration + 1;
+  } else {
+    stats.solver_backend = "legacy_relaxation";
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+      double iteration_max_translation = 0.0;
+      double iteration_max_rotation = 0.0;
 
-    if (iteration_max_translation < 1.0e-4 && iteration_max_rotation < 1.0e-3) {
-      convergence_reason = "step_tolerance";
-      break;
+      for (const auto & edge : pose_graph_edges_) {
+        if (edge.from_index < 0 || edge.to_index < 0 ||
+          edge.from_index >= static_cast<int>(poses.size()) ||
+          edge.to_index >= static_cast<int>(poses.size()))
+        {
+          continue;
+        }
+
+        const int from_index = edge.from_index;
+        const int to_index = edge.to_index;
+        const Eigen::Isometry3d expected_to =
+          poses[static_cast<std::size_t>(from_index)] * edge.from_T_to;
+        Eigen::Isometry3d correction =
+          projectToRigidIsometry(
+          expected_to * poses[static_cast<std::size_t>(to_index)].inverse());
+        if (pose_graph_planar_correction_enabled_) {
+          correction = planarizeCorrection(correction);
+        }
+
+        const double to_share = from_index == 0 ? 1.0 : 0.5;
+        const double from_share = to_index == 0 ? 1.0 : 0.5;
+        const double robust_weight = poseGraphLoopRobustWeight(
+          edge,
+          poseGraphEdgeSquaredError(edge, poses));
+        const double translation_step =
+          std::clamp(
+          base_step * std::max(0.0, edge.translation_weight) * robust_weight,
+          0.0,
+          1.0);
+        const double vertical_translation_step =
+          std::clamp(
+          base_step * std::max(0.0, edge.vertical_translation_weight) * robust_weight,
+          0.0,
+          1.0);
+        const double rotation_step =
+          std::clamp(
+          base_step * std::max(0.0, edge.rotation_weight) * robust_weight,
+          0.0,
+          1.0);
+
+        if (to_index > 0) {
+          Eigen::Isometry3d to_correction = interpolateTransform(
+            correction,
+            translation_step * to_share,
+            rotation_step * to_share);
+          to_correction.translation().z() =
+            correction.translation().z() * vertical_translation_step * to_share;
+          to_correction = limitCorrectionStep(
+            to_correction,
+            max_translation_step,
+            max_rotation_step);
+          iteration_max_translation = std::max(
+            iteration_max_translation,
+            to_correction.translation().norm());
+          iteration_max_rotation = std::max(
+            iteration_max_rotation,
+            rotationAngleDeg(to_correction.linear()));
+          poses[static_cast<std::size_t>(to_index)] =
+            projectToRigidIsometry(
+            to_correction * poses[static_cast<std::size_t>(to_index)]);
+        }
+
+        if (from_index > 0) {
+          const Eigen::Isometry3d inverse_correction = correction.inverse();
+          Eigen::Isometry3d from_correction = interpolateTransform(
+            inverse_correction,
+            translation_step * from_share,
+            rotation_step * from_share);
+          from_correction.translation().z() =
+            inverse_correction.translation().z() *
+            vertical_translation_step * from_share;
+          from_correction = limitCorrectionStep(
+            from_correction,
+            max_translation_step,
+            max_rotation_step);
+          iteration_max_translation = std::max(
+            iteration_max_translation,
+            from_correction.translation().norm());
+          iteration_max_rotation = std::max(
+            iteration_max_rotation,
+            rotationAngleDeg(from_correction.linear()));
+          poses[static_cast<std::size_t>(from_index)] =
+            projectToRigidIsometry(
+            from_correction * poses[static_cast<std::size_t>(from_index)]);
+        }
+      }
+
+      const double objective = poseGraphResidual(poses, true);
+      if (objective < best_objective) {
+        best_objective = objective;
+        best_poses = poses;
+      }
+      stats.max_update_translation_m = std::max(
+        stats.max_update_translation_m,
+        iteration_max_translation);
+      stats.max_update_rotation_deg = std::max(
+        stats.max_update_rotation_deg,
+        iteration_max_rotation);
+      stats.iterations = iteration + 1;
+
+      if (iteration_max_translation < 1.0e-4 && iteration_max_rotation < 1.0e-3) {
+        convergence_reason = "step_tolerance";
+        break;
+      }
     }
   }
   stats.iteration_runtime_ms = std::chrono::duration<double, std::milli>(
@@ -9544,12 +10012,14 @@ void ScanToMapIcp::applyPoseGraphCorrection(
 {
   result.pose_graph_correction_applied = false;
   result.pose_graph_new_loop_rejected = false;
+  result.pose_graph_new_loop_registration_information_used = false;
   result.pose_graph_minimum_interval_override_applied = false;
   result.pose_graph_duplicate_submap_pair_override_applied = false;
   result.pose_graph_minimum_interval_elapsed_s = -1.0;
   result.pose_graph_minimum_interval_status = "not_evaluated";
   result.pose_graph_duplicate_submap_pair_previous_edges = 0;
   result.pose_graph_duplicate_submap_pair_status = "not_evaluated";
+  result.pose_graph_new_loop_information_status = "not_evaluated";
   result.pose_graph_same_layer_z_constraint_evaluated = false;
   result.pose_graph_same_layer_z_constraint_applied = false;
   result.pose_graph_same_layer_z_seed_applied = false;
@@ -9582,10 +10052,23 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_constraint_inlier_rmse_m = 0.0;
   result.pose_graph_constraint_target_coverage_ratio = 0.0;
   result.pose_graph_optimization_iterations = 0;
+  result.pose_graph_solver_stages = 0;
+  result.pose_graph_solver_successful_steps = 0;
+  result.pose_graph_solver_unsuccessful_steps = 0;
+  result.pose_graph_dcs_downweighted_loop_edges = 0;
+  result.pose_graph_registration_information_edges = 0;
+  result.pose_graph_configured_diagonal_information_edges = 0;
+  result.pose_graph_minimum_registration_observable_rank = 0;
+  result.pose_graph_maximum_registration_hessian_condition = 0.0;
+  result.pose_graph_minimum_registration_information_gain = 1.0;
+  result.pose_graph_new_loop_information_min_gain = 1.0;
   result.pose_graph_optimization_runtime_ms = 0.0;
   result.pose_graph_iteration_runtime_ms = 0.0;
   result.pose_graph_mean_iteration_runtime_ms = 0.0;
   result.pose_graph_solver_status = "not_run";
+  result.pose_graph_solver_backend = "not_run";
+  result.pose_graph_solver_gradient_available = false;
+  result.pose_graph_solver_step_counts_available = false;
   result.pose_graph_convergence_reason = "not_run";
   result.pose_graph_edges = static_cast<int>(pose_graph_edges_.size());
   result.pose_graph_loop_edges = 0;
@@ -9603,6 +10086,11 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_robust_objective_before_ground_sequence = 0.0;
   result.pose_graph_min_loop_robust_weight = 1.0;
   result.pose_graph_new_loop_robust_weight = 1.0;
+  result.pose_graph_dcs_min_scale = 1.0;
+  result.pose_graph_new_loop_dcs_scale = 1.0;
+  result.pose_graph_solver_first_stage_initial_cost = 0.0;
+  result.pose_graph_solver_last_stage_final_cost = 0.0;
+  result.pose_graph_solver_final_gradient_max_norm = 0.0;
   result.pose_graph_max_update_translation_m = 0.0;
   result.pose_graph_max_update_rotation_deg = 0.0;
 
@@ -9837,16 +10325,66 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_same_layer_z_translation_weight =
     result.pose_graph_same_layer_z_constraint_applied ?
     loop_vertical_translation_weight : 0.0;
-  const Eigen::Isometry3d prospective_loop_error =
-    projectToRigidIsometry(graph_target_loop_pose.inverse() * keyframes_.back().map_T_base);
-  const double prospective_loop_rotation_rad =
-    rotationAngleDeg(prospective_loop_error.linear()) * M_PI / 180.0;
-  const double prospective_loop_residual =
-    weightedMapTranslationSquaredError(
-    graph_target_loop_pose.translation(), keyframes_.back().map_T_base.translation(),
-    pose_graph_loop_translation_weight_, loop_vertical_translation_weight) +
-    std::max(0.0, pose_graph_loop_rotation_weight_) *
-    prospective_loop_rotation_rad * prospective_loop_rotation_rad;
+  Vector6d configured_loop_information;
+  configured_loop_information <<
+    std::max(0.0, pose_graph_loop_translation_weight_),
+    std::max(0.0, pose_graph_loop_translation_weight_),
+    std::max(0.0, loop_vertical_translation_weight),
+    std::max(0.0, pose_graph_loop_rotation_weight_),
+    std::max(0.0, pose_graph_loop_rotation_weight_),
+    std::max(0.0, pose_graph_loop_rotation_weight_);
+  RegistrationInformationResult loop_registration_information;
+  const Eigen::Isometry3d latest_keyframe_T_current =
+    keyframes_.back().map_T_base.inverse() * reference_pose;
+  const Eigen::Isometry3d information_registration_pose = projectToRigidIsometry(
+    graph_target_loop_pose * latest_keyframe_T_current);
+  const bool information_pose_matches_loop_measurement =
+    result.registration_information_pose_map_T_base.matrix().isApprox(
+    information_registration_pose.matrix(), 1.0e-6);
+  if (pose_graph_information_mode_ == "registration_observability" &&
+    result.registration_information_valid && information_pose_matches_loop_measurement)
+  {
+    const Eigen::Vector3d endpoint_to_registration_origin_map =
+      graph_target_loop_pose.linear() * latest_keyframe_T_current.translation();
+    loop_registration_information = registrationHessianToPoseGraphInformation(
+      result.registration_information_hessian_map_rt,
+      keyframes_[static_cast<std::size_t>(graph_anchor_index)].map_T_base,
+      configured_loop_information,
+      pose_graph_information_config_,
+      endpoint_to_registration_origin_map);
+  }
+  if (pose_graph_information_mode_ != "registration_observability") {
+    result.pose_graph_new_loop_information_status = "configured_diagonal_mode";
+  } else if (!result.registration_information_valid) {
+    result.pose_graph_new_loop_information_status = "registration_information_invalid";
+  } else if (!information_pose_matches_loop_measurement) {
+    result.pose_graph_new_loop_information_status = "linearization_pose_mismatch";
+  } else if (!loop_registration_information.valid) {
+    result.pose_graph_new_loop_information_status =
+      "conversion_" + loop_registration_information.failure_reason;
+  } else {
+    result.pose_graph_new_loop_information_status = "registration_observability";
+  }
+  result.pose_graph_new_loop_registration_information_used =
+    loop_registration_information.valid;
+  result.pose_graph_new_loop_information_min_gain = loop_registration_information.valid ?
+    loop_registration_information.minimum_information_gain : 1.0;
+  PoseGraphConstraint prospective_loop_constraint;
+  prospective_loop_constraint.from_index = 0;
+  prospective_loop_constraint.to_index = 1;
+  prospective_loop_constraint.from_T_to =
+    keyframes_[static_cast<std::size_t>(graph_anchor_index)].map_T_base.inverse() *
+    graph_target_loop_pose;
+  prospective_loop_constraint.information_matrix = loop_registration_information.valid ?
+    loop_registration_information.information_matrix :
+    configuredDiagonalInformation(configured_loop_information);
+  prospective_loop_constraint.loop_closure = true;
+  const std::vector<Eigen::Isometry3d> prospective_loop_poses{
+    keyframes_[static_cast<std::size_t>(graph_anchor_index)].map_T_base,
+    keyframes_.back().map_T_base};
+  const double prospective_loop_residual = poseGraphConstraintChiSquared(
+    prospective_loop_constraint,
+    prospective_loop_poses);
   result.pose_graph_residual_before = prospective_loop_residual;
   const double max_loop_residual_before = std::max(0.0, pose_graph_max_loop_residual_before_);
   if (max_loop_residual_before > 0.0 &&
@@ -9869,8 +10407,22 @@ void ScanToMapIcp::applyPoseGraphCorrection(
     previous_keyframe_poses,
     result.pose_graph_same_layer_z_constraint_applied,
     loop_vertical_translation_weight,
-    result.pose_graph_high_confidence_large_loop);
+    result.pose_graph_high_confidence_large_loop,
+    loop_registration_information.valid ? &loop_registration_information : nullptr);
   result.pose_graph_optimization_iterations = stats.iterations;
+  result.pose_graph_solver_stages = stats.solver_stages;
+  result.pose_graph_solver_successful_steps = stats.solver_successful_steps;
+  result.pose_graph_solver_unsuccessful_steps = stats.solver_unsuccessful_steps;
+  result.pose_graph_dcs_downweighted_loop_edges = stats.dcs_downweighted_loop_edges;
+  result.pose_graph_registration_information_edges = stats.registration_information_edges;
+  result.pose_graph_configured_diagonal_information_edges =
+    stats.configured_diagonal_information_edges;
+  result.pose_graph_minimum_registration_observable_rank =
+    stats.minimum_registration_observable_rank;
+  result.pose_graph_maximum_registration_hessian_condition =
+    stats.maximum_registration_hessian_condition;
+  result.pose_graph_minimum_registration_information_gain =
+    stats.minimum_registration_information_gain;
   result.pose_graph_edges = stats.edges;
   result.pose_graph_loop_edges = stats.loop_edges;
   result.pose_graph_robust_loop_edges_downweighted = stats.robust_loop_edges_downweighted;
@@ -9884,6 +10436,14 @@ void ScanToMapIcp::applyPoseGraphCorrection(
     stats.robust_objective_before_ground_sequence;
   result.pose_graph_min_loop_robust_weight = stats.min_loop_robust_weight;
   result.pose_graph_new_loop_robust_weight = stats.new_loop_robust_weight;
+  result.pose_graph_dcs_min_scale = stats.dcs_min_scale;
+  result.pose_graph_new_loop_dcs_scale = stats.new_loop_dcs_scale;
+  result.pose_graph_solver_first_stage_initial_cost =
+    stats.solver_first_stage_initial_cost;
+  result.pose_graph_solver_last_stage_final_cost =
+    stats.solver_last_stage_final_cost;
+  result.pose_graph_solver_final_gradient_max_norm =
+    stats.solver_final_gradient_max_norm;
   result.pose_graph_max_update_translation_m = stats.max_update_translation_m;
   result.pose_graph_max_update_rotation_deg = stats.max_update_rotation_deg;
   result.pose_graph_same_layer_z_seed_applied = stats.same_layer_z_seed_applied;
@@ -9915,6 +10475,9 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_iteration_runtime_ms = stats.iteration_runtime_ms;
   result.pose_graph_mean_iteration_runtime_ms = stats.mean_iteration_runtime_ms;
   result.pose_graph_solver_status = stats.solver_status;
+  result.pose_graph_solver_backend = stats.solver_backend;
+  result.pose_graph_solver_gradient_available = stats.solver_gradient_available;
+  result.pose_graph_solver_step_counts_available = stats.solver_step_counts_available;
   result.pose_graph_convergence_reason = stats.convergence_reason;
   result.pose_graph_new_loop_rejected = stats.new_loop_rejected;
   result.pose_graph_rejection_reason = stats.rejection_reason;
@@ -9966,16 +10529,60 @@ void ScanToMapIcp::rebuildGlobalMap()
       refreshKeyframeCloudMap(index);
     }
     const auto & keyframe = keyframes_[index];
-    if (!keyframe.mapping_cloud_map || keyframe.mapping_cloud_map->empty()) {
-      continue;
+    if (keyframe.mapping_cloud_map) {
+      *merged += *keyframe.mapping_cloud_map;
     }
-    *merged += *(keyframe.mapping_cloud_map);
   }
-
   global_map_ = downsampleCloud(merged, map_voxel_leaf_m_);
   rebuildSubmaps();
   rebuildTerrainEvidenceMap();
   latest_local_map_ = buildLocalMap(map_T_base_);
+}
+
+void ScanToMapIcp::exportKeyframes(
+  const std::shared_ptr<std_srvs::srv::Trigger::Response> & response)
+{
+  if (keyframe_archive_directory_.empty()) {
+    response->success = false;
+    response->message = "Set keyframe_archive_directory before mapping to retain sensor views.";
+    return;
+  }
+  KeyframeArchive archive;
+  {
+    // Capture poses and immutable base clouds from one graph revision; perform I/O unlocked.
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    archive.map_frame = map_frame_;
+    archive.base_frame = base_frame_;
+    archive.map_z_filter_enabled = map_z_filter_enabled_;
+    archive.map_z_min_m = std::min(map_z_filter_min_m_, map_z_filter_max_m_);
+    archive.map_z_max_m = std::max(map_z_filter_min_m_, map_z_filter_max_m_);
+    archive.pruned_keyframes = pruned_keyframe_count_;
+    archive.keyframes.reserve(keyframes_.size());
+    for (const auto & keyframe : keyframes_) {
+      ArchivedKeyframe entry;
+      entry.id = keyframe.archive_id;
+      entry.stamp_ns = keyframe.stamp.nanoseconds();
+      entry.map_T_base = keyframe.map_T_base;
+      for (const auto & scan : keyframe.archive_sensor_scans) {
+        if (scan.cloud_base && !scan.cloud_base->empty()) {
+          entry.scans.push_back(ArchivedSensorScan{scan.cloud_base, scan.sensor_origin_base});
+        }
+      }
+      archive.keyframes.push_back(std::move(entry));
+    }
+  }
+  try {
+    writeKeyframeArchive(keyframe_archive_directory_, archive);
+    response->success = true;
+    response->message = "Exported " + std::to_string(archive.keyframes.size()) +
+      " retained keyframes to " + keyframe_archive_directory_ +
+      " (pruned=" + std::to_string(archive.pruned_keyframes) + ")";
+    RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+  } catch (const std::exception & error) {
+    response->success = false;
+    response->message = error.what();
+    RCLCPP_ERROR(get_logger(), "Keyframe export failed: %s", error.what());
+  }
 }
 
 void ScanToMapIcp::publishState(
@@ -10439,6 +11046,11 @@ void ScanToMapIcp::publishDiagnostics(
   add_value("inlier_ratio", toString(result.inlier_ratio));
   add_value("inlier_rmse_m", toString(result.inlier_rmse_m));
   add_value("registration_method", registration_method_);
+  std::string available_methods;
+  for (const auto & method : availableRegistrationMethods()) {
+    available_methods += (available_methods.empty() ? "" : ",") + method;
+  }
+  add_value("registration_available_methods", available_methods);
   add_value(
     "robust_registration",
     robust_registration_enabled_ ? "enabled" : "disabled");
@@ -10505,6 +11117,19 @@ void ScanToMapIcp::publishDiagnostics(
     "surfel_hessian_eigenvalues",
     surfel_eigenvalues.str());
   add_value("surfel_hessian_condition", toString(result.surfel_hessian_condition));
+  add_value(
+    "registration_information_valid",
+    result.registration_information_valid ? "true" : "false");
+  add_value("registration_information_status", result.registration_information_status);
+  add_value(
+    "registration_information_observable_rank",
+    toString(result.registration_information_observable_rank));
+  add_value(
+    "registration_information_hessian_condition",
+    toString(result.registration_information_hessian_condition));
+  add_value(
+    "registration_information_evaluation_runtime_ms",
+    toString(result.registration_information_evaluation_runtime_ms));
   add_value(
     "surfel_weak_rotation_x",
     toString(result.surfel_weak_rotation_axes.x()));
@@ -11144,6 +11769,19 @@ void ScanToMapIcp::publishDiagnostics(
   add_value(
     "pose_graph_correction",
     pose_graph_correction_enabled_ ? "enabled" : "disabled");
+  add_value("pose_graph_solver", pose_graph_solver_);
+  add_value("pose_graph_compiled_solvers", pose_graph_compiled_solvers_);
+  add_value("pose_graph_solver_backend", result.pose_graph_solver_backend);
+  add_value("pose_graph_information_mode", pose_graph_information_mode_);
+  add_value(
+    "pose_graph_information_relative_eigen_threshold",
+    toString(pose_graph_information_config_.relative_eigen_threshold));
+  add_value(
+    "pose_graph_information_strong_eigenvalue_ratio",
+    toString(pose_graph_information_config_.strong_eigenvalue_ratio));
+  add_value(
+    "pose_graph_information_weak_ratio",
+    toString(pose_graph_information_config_.weak_information_ratio));
   add_value(
     "pose_graph_planar_correction",
     pose_graph_planar_correction_enabled_ ? "enabled" : "disabled");
@@ -11184,6 +11822,22 @@ void ScanToMapIcp::publishDiagnostics(
     "pose_graph_minimum_interval_override_single_floor_z_weight_multiplier",
     toString(pose_graph_minimum_interval_override_single_floor_z_weight_multiplier_));
   add_value("pose_graph_loop_cauchy_scale", toString(pose_graph_loop_cauchy_scale_));
+  add_value(
+    "pose_graph_ceres_robust_stage_count",
+    toString(pose_graph_optimizer_config_.robust_scale_factors.size()));
+  add_value(
+    "pose_graph_ceres_max_iterations_per_stage",
+    toString(pose_graph_optimizer_config_.max_iterations_per_stage));
+  add_value(
+    "pose_graph_ceres_dcs",
+    pose_graph_optimizer_config_.dcs_enabled ? "enabled" : "disabled");
+  add_value(
+    "pose_graph_ceres_dcs_start_stage",
+    toString(pose_graph_optimizer_config_.dcs_start_stage));
+  add_value("pose_graph_ceres_dcs_phi", toString(pose_graph_optimizer_config_.dcs_phi));
+  add_value(
+    "pose_graph_ceres_dcs_min_scale",
+    toString(pose_graph_optimizer_config_.dcs_min_scale));
   add_value(
     "pose_graph_min_new_loop_robust_weight",
     toString(pose_graph_min_new_loop_robust_weight_));
@@ -11342,6 +11996,59 @@ void ScanToMapIcp::publishDiagnostics(
   add_value(
     "pose_graph_optimization_iterations",
     toString(result.pose_graph_optimization_iterations));
+  add_value("pose_graph_solver_stages", toString(result.pose_graph_solver_stages));
+  add_value(
+    "pose_graph_solver_gradient_available",
+    result.pose_graph_solver_gradient_available ? "true" : "false");
+  add_value(
+    "pose_graph_solver_step_counts_available",
+    result.pose_graph_solver_step_counts_available ? "true" : "false");
+  add_value(
+    "pose_graph_solver_successful_steps",
+    toString(result.pose_graph_solver_successful_steps));
+  add_value(
+    "pose_graph_solver_unsuccessful_steps",
+    toString(result.pose_graph_solver_unsuccessful_steps));
+  add_value(
+    "pose_graph_dcs_downweighted_loop_edges",
+    toString(result.pose_graph_dcs_downweighted_loop_edges));
+  add_value(
+    "pose_graph_registration_information_edges",
+    toString(result.pose_graph_registration_information_edges));
+  add_value(
+    "pose_graph_configured_diagonal_information_edges",
+    toString(result.pose_graph_configured_diagonal_information_edges));
+  add_value(
+    "pose_graph_minimum_registration_observable_rank",
+    toString(result.pose_graph_minimum_registration_observable_rank));
+  add_value(
+    "pose_graph_maximum_registration_hessian_condition",
+    toString(result.pose_graph_maximum_registration_hessian_condition));
+  add_value(
+    "pose_graph_minimum_registration_information_gain",
+    toString(result.pose_graph_minimum_registration_information_gain));
+  add_value(
+    "pose_graph_new_loop_registration_information_used",
+    result.pose_graph_new_loop_registration_information_used ? "true" : "false");
+  add_value(
+    "pose_graph_new_loop_information_status",
+    result.pose_graph_new_loop_information_status);
+  add_value(
+    "pose_graph_new_loop_information_min_gain",
+    toString(result.pose_graph_new_loop_information_min_gain));
+  add_value("pose_graph_dcs_min_scale", toString(result.pose_graph_dcs_min_scale));
+  add_value(
+    "pose_graph_new_loop_dcs_scale",
+    toString(result.pose_graph_new_loop_dcs_scale));
+  add_value(
+    "pose_graph_solver_first_stage_initial_cost",
+    toString(result.pose_graph_solver_first_stage_initial_cost));
+  add_value(
+    "pose_graph_solver_last_stage_final_cost",
+    toString(result.pose_graph_solver_last_stage_final_cost));
+  add_value(
+    "pose_graph_solver_final_gradient_max_norm",
+    toString(result.pose_graph_solver_final_gradient_max_norm));
   add_value(
     "pose_graph_optimization_runtime_ms",
     toString(result.pose_graph_optimization_runtime_ms));
@@ -11486,6 +12193,17 @@ void ScanToMapIcp::publishDiagnostics(
     "active_submap_accumulated_travel_m",
     have_active_submap ? toString(submaps_.back().accumulated_travel_m) : "0");
   add_value("global_map_points", toString(global_map_ ? global_map_->size() : 0));
+  add_value("map_cleanup", "external_postprocess");
+  add_value("global_map_semantics", "unfiltered_mapping_cloud");
+  add_value("keyframe_archive_directory", keyframe_archive_directory_);
+  add_value("loop_candidate_archive_directory", loop_candidate_archive_directory_);
+  add_value("loop_candidate_archive_attempts", toString(loop_candidate_archive_attempts_));
+  add_value("loop_candidate_archive_saved", toString(loop_candidate_archive_saved_));
+  add_value("loop_candidate_archive_failed", toString(loop_candidate_archive_failed_));
+  add_value(
+    "keyframe_archive_retention",
+    keyframe_archive_directory_.empty() ? "disabled" : "enabled");
+  add_value("keyframe_archive_pruned_keyframes", toString(pruned_keyframe_count_));
   const TerrainAccumulatorStats terrain_stats = terrain_accumulator_.stats();
   const TerrainPreviewStats terrain_preview_stats = terrain_preview_tracker_.stats();
   add_value("terrain_evidence", terrain_config_.enabled ? "enabled" : "disabled");

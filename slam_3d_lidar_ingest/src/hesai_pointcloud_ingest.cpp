@@ -11,6 +11,7 @@
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
 #include "diagnostic_msgs/msg/key_value.hpp"
 #include "sensor_msgs/msg/point_field.hpp"
+#include "slam_3d_lidar_ingest/point_budget.hpp"
 
 namespace gole
 {
@@ -74,6 +75,14 @@ HesaiPointCloudIngest::HesaiPointCloudIngest(const rclcpp::NodeOptions & options
 
   input_depth_ = declare_parameter<int>("input_depth", 10);
   output_depth_ = declare_parameter<int>("output_depth", 5);
+  const auto max_output_points = declare_parameter<std::int64_t>("max_output_points", 0);
+  if (max_output_points < 0 || max_output_points == 1 ||
+    max_output_points > std::numeric_limits<std::uint32_t>::max() / kCanonicalPointStep)
+  {
+    throw std::invalid_argument(
+            "max_output_points must be 0 (unlimited) or >= 2 within cloud limits");
+  }
+  max_output_points_ = static_cast<std::size_t>(max_output_points);
   const bool input_reliable = declare_parameter<bool>("input_reliable", true);
   const bool output_reliable = declare_parameter<bool>("output_reliable", true);
   drop_nonfinite_points_ = declare_parameter<bool>("drop_nonfinite_points", true);
@@ -314,6 +323,9 @@ void HesaiPointCloudIngest::processMessage(
 {
   auto & sensor = sensors_.at(sensor_index);
   auto result = validateHesaiPointCloud(*message, sensor.contract_options);
+  if (result.accepted() && drop_nonfinite_points_ && result.finite_point_count == 0) {
+    result.code = CloudContractCode::kInsufficientFinitePoints;
+  }
   const std::int64_t receive_time_ns = get_clock()->now().nanoseconds();
   const std::int64_t input_header_ns = stampNanoseconds(message->header.stamp);
   if (
@@ -445,8 +457,9 @@ void HesaiPointCloudIngest::processMessage(
     return;
   }
 
-  sensor.publisher->publish(
-    buildCanonicalCloud(*message, sensor, result, output_stamp.output_start_ns));
+  auto output = buildCanonicalCloud(*message, sensor, result, output_stamp.output_start_ns);
+  sensor.last_output_point_count = output.width;
+  sensor.publisher->publish(output);
   sensor.last_output_start_ns.store(output_stamp.output_start_ns);
   ++sensor.accepted_scan_count;
   publishDiagnostics(
@@ -471,8 +484,11 @@ sensor_msgs::msg::PointCloud2 HesaiPointCloudIngest::buildCanonicalCloud(
     output_start_ns % 1000000000LL);
   output.header.frame_id = message.header.frame_id;
   output.height = 1;
-  output.width = static_cast<std::uint32_t>(
-    drop_nonfinite_points_ ? result.finite_point_count : result.point_count);
+  const std::size_t available_count = drop_nonfinite_points_ ?
+    result.finite_point_count : result.point_count;
+  const std::size_t selected_count = max_output_points_ == 0 ? available_count :
+    std::min(available_count, max_output_points_);
+  output.width = static_cast<std::uint32_t>(selected_count);
   output.fields = {
     makeField("x", 0, sensor_msgs::msg::PointField::FLOAT32),
     makeField("y", 4, sensor_msgs::msg::PointField::FLOAT32),
@@ -489,18 +505,13 @@ sensor_msgs::msg::PointCloud2 HesaiPointCloudIngest::buildCanonicalCloud(
   output.is_dense = result.invalid_point_count == 0 || drop_nonfinite_points_;
 
   std::size_t output_index = 0;
-  for (std::uint32_t row = 0; row < message.height; ++row) {
-    const auto * row_start = message.data.data() +
-      static_cast<std::size_t>(row) * message.row_step;
-    for (std::uint32_t column = 0; column < message.width; ++column) {
-      const auto * source = row_start +
-        static_cast<std::size_t>(column) * message.point_step;
+  const auto append_point = [&](const std::uint8_t * source) {
       const float x = readField<float>(source, result.layout.x_offset);
       const float y = readField<float>(source, result.layout.y_offset);
       const float z = readField<float>(source, result.layout.z_offset);
       const bool finite = std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
       if (!finite && drop_nonfinite_points_) {
-        continue;
+        return;
       }
 
       const float intensity =
@@ -526,8 +537,49 @@ sensor_msgs::msg::PointCloud2 HesaiPointCloudIngest::buildCanonicalCloud(
       writeField(destination, 20, ring);
       writeField(destination, 22, sensor.sensor_id);
       ++output_index;
+    };
+  if (selected_count == available_count) {
+    // Keep the uncapped sequential path free of per-point integer divisions.
+    for (std::uint32_t row = 0; row < message.height; ++row) {
+      const auto * row_start = message.data.data() +
+        static_cast<std::size_t>(row) * message.row_step;
+      for (std::uint32_t column = 0; column < message.width; ++column) {
+        append_point(row_start + static_cast<std::size_t>(column) * message.point_step);
+      }
+    }
+  } else {
+    const auto point_at = [&](const std::size_t index) {
+        return message.data.data() + (index / message.width) * message.row_step +
+               (index % message.width) * message.point_step;
+      };
+    const auto finite_at = [&](const std::size_t index) {
+        const auto * point = point_at(index);
+        return std::isfinite(readField<float>(point, result.layout.x_offset)) &&
+               std::isfinite(readField<float>(point, result.layout.y_offset)) &&
+               std::isfinite(readField<float>(point, result.layout.z_offset));
+      };
+    std::size_t first = 0;
+    std::size_t last = result.point_count - 1;
+    if (drop_nonfinite_points_) {
+      // There are more finite points than the cap here. Anchor sampling on
+      // their extent so invalid edge records cannot remove both scan ends.
+      while (!finite_at(first)) {
+        ++first;
+      }
+      while (!finite_at(last)) {
+        --last;
+      }
+    }
+    for (std::size_t sample = 0; sample < selected_count; ++sample) {
+      const std::size_t index = first + stratifiedPointIndex(
+        sample, selected_count, last - first + 1, sensor.accepted_scan_count);
+      append_point(point_at(index));
     }
   }
+
+  output.width = static_cast<std::uint32_t>(output_index);
+  output.row_step = output.width * output.point_step;
+  output.data.resize(output.row_step);
 
   return output;
 }
@@ -630,6 +682,10 @@ void HesaiPointCloudIngest::publishDiagnostics(
       "scan_duration_s",
       valueString(static_cast<double>(result.scan_duration_ns) * 1.0e-9)),
     keyValue("point_count", valueString(result.point_count)),
+    keyValue("max_output_points", valueString(max_output_points_)),
+    keyValue(
+      "output_point_count",
+      valueString(result.accepted() ? sensor.last_output_point_count : 0)),
     keyValue("finite_point_count", valueString(result.finite_point_count)),
     keyValue("invalid_point_count", valueString(result.invalid_point_count)),
     keyValue("finite_point_ratio", valueString(result.finite_point_ratio)),
