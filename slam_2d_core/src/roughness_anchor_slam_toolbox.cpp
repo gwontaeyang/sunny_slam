@@ -1,9 +1,11 @@
 #include "slam_2d_core/roughness_anchor_slam_toolbox.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -116,6 +118,20 @@ double poseTranslationDistance(const karto::Pose2 & first, const karto::Pose2 & 
   return std::hypot(first.GetX() - second.GetX(), first.GetY() - second.GetY());
 }
 
+double quantile(std::vector<double> values, const double probability)
+{
+  if (values.empty()) {
+    return 0.0;
+  }
+  std::sort(values.begin(), values.end());
+  const double index = std::clamp(probability, 0.0, 1.0) *
+    static_cast<double>(values.size() - 1);
+  const auto lower = static_cast<std::size_t>(std::floor(index));
+  const auto upper = static_cast<std::size_t>(std::ceil(index));
+  const double fraction = index - static_cast<double>(lower);
+  return values[lower] * (1.0 - fraction) + values[upper] * fraction;
+}
+
 std::string normalizedMode(std::string value)
 {
   std::transform(
@@ -143,6 +159,94 @@ RawWindowSide rawWindowSide(const std::string & role, bool target)
     return RawWindowSide::kAfter;
   }
   return RawWindowSide::kCentered;
+}
+
+std::string singleLine(std::string value)
+{
+  std::replace(value.begin(), value.end(), '\n', '|');
+  std::replace(value.begin(), value.end(), '\r', '|');
+  return value;
+}
+
+class LoopClosureDiagnostics final : public karto::MapperLoopClosureListener
+{
+public:
+  void LoopClosureCheck(const std::string & info) override
+  {
+    const std::string message = singleLine(info);
+    std::string phase = "other";
+    std::uint64_t phase_id = 0;
+    if (message.rfind("COARSE RESPONSE:", 0) == 0) {
+      phase = "coarse";
+      phase_id = coarse_count_.fetch_add(1) + 1;
+    } else if (message.rfind("FINE RESPONSE:", 0) == 0) {
+      phase = "fine";
+      phase_id = fine_count_.fetch_add(1) + 1;
+    } else if (message.rfind("REJECTED!", 0) == 0) {
+      phase = "rejected";
+      phase_id = rejected_count_.fetch_add(1) + 1;
+    } else {
+      phase_id = other_count_.fetch_add(1) + 1;
+    }
+    RCLCPP_INFO(
+      rclcpp::get_logger("karto_loop_closure_diagnostics"),
+      "KARTO_LOOP_DIAG phase=%s phase_id=%llu coarse=%llu fine=%llu rejected=%llu "
+      "begin=%llu end=%llu info=\"%s\"",
+      phase.c_str(),
+      static_cast<unsigned long long>(phase_id),
+      static_cast<unsigned long long>(coarse_count_.load()),
+      static_cast<unsigned long long>(fine_count_.load()),
+      static_cast<unsigned long long>(rejected_count_.load()),
+      static_cast<unsigned long long>(begin_count_.load()),
+      static_cast<unsigned long long>(end_count_.load()),
+      message.c_str());
+  }
+
+  void BeginLoopClosure(const std::string & info) override
+  {
+    const std::uint64_t phase_id = begin_count_.fetch_add(1) + 1;
+    RCLCPP_INFO(
+      rclcpp::get_logger("karto_loop_closure_diagnostics"),
+      "KARTO_LOOP_DIAG phase=begin phase_id=%llu coarse=%llu fine=%llu rejected=%llu "
+      "begin=%llu end=%llu info=\"%s\"",
+      static_cast<unsigned long long>(phase_id),
+      static_cast<unsigned long long>(coarse_count_.load()),
+      static_cast<unsigned long long>(fine_count_.load()),
+      static_cast<unsigned long long>(rejected_count_.load()),
+      static_cast<unsigned long long>(begin_count_.load()),
+      static_cast<unsigned long long>(end_count_.load()),
+      singleLine(info).c_str());
+  }
+
+  void EndLoopClosure(const std::string & info) override
+  {
+    const std::uint64_t phase_id = end_count_.fetch_add(1) + 1;
+    RCLCPP_INFO(
+      rclcpp::get_logger("karto_loop_closure_diagnostics"),
+      "KARTO_LOOP_DIAG phase=end phase_id=%llu coarse=%llu fine=%llu rejected=%llu "
+      "begin=%llu end=%llu info=\"%s\"",
+      static_cast<unsigned long long>(phase_id),
+      static_cast<unsigned long long>(coarse_count_.load()),
+      static_cast<unsigned long long>(fine_count_.load()),
+      static_cast<unsigned long long>(rejected_count_.load()),
+      static_cast<unsigned long long>(begin_count_.load()),
+      static_cast<unsigned long long>(end_count_.load()),
+      singleLine(info).c_str());
+  }
+
+private:
+  std::atomic<std::uint64_t> coarse_count_{0};
+  std::atomic<std::uint64_t> fine_count_{0};
+  std::atomic<std::uint64_t> rejected_count_{0};
+  std::atomic<std::uint64_t> begin_count_{0};
+  std::atomic<std::uint64_t> end_count_{0};
+  std::atomic<std::uint64_t> other_count_{0};
+};
+
+LoopClosureDiagnostics & loopClosureDiagnostics()
+{
+  static LoopClosureDiagnostics diagnostics;
+  return diagnostics;
 }
 
 }  // namespace
@@ -196,11 +300,56 @@ RoughnessAnchorSlamToolbox::RoughnessAnchorSlamToolbox(rclcpp::NodeOptions optio
   declare_parameter("roughness_anchor_max_constraint_pairs", 8);
   declare_parameter("roughness_anchor_require_complete_pair", true);
   declare_parameter("roughness_anchor_update_map_after_constraints", true);
+  declare_parameter("enable_loop_closure_diagnostics", false);
+  declare_parameter("optimize_loaded_pose_graph_once", false);
+  declare_parameter("revisit_optimizer_filter_long_edges", false);
+  declare_parameter("revisit_optimizer_min_state_id_separation", 20);
+  declare_parameter("revisit_optimizer_min_time_separation_s", 60.0);
+  declare_parameter("revisit_optimizer_max_translation_variance", 0.03);
+  declare_parameter("revisit_optimizer_max_yaw_variance", 0.001);
+  declare_parameter("revisit_optimizer_max_current_translation_residual_m", -1.0);
+  declare_parameter("revisit_optimizer_max_current_yaw_residual_deg", -1.0);
 }
 
 void RoughnessAnchorSlamToolbox::configure()
 {
   slam_toolbox::SynchronousSlamToolbox::configure();
+  get_parameter("enable_loop_closure_diagnostics", enable_loop_closure_diagnostics_);
+  get_parameter("optimize_loaded_pose_graph_once", optimize_loaded_pose_graph_once_);
+  get_parameter(
+    "revisit_optimizer_filter_long_edges",
+    revisit_optimizer_filter_long_edges_);
+  get_parameter(
+    "revisit_optimizer_min_state_id_separation",
+    revisit_optimizer_min_state_id_separation_);
+  get_parameter(
+    "revisit_optimizer_min_time_separation_s",
+    revisit_optimizer_min_time_separation_s_);
+  get_parameter(
+    "revisit_optimizer_max_translation_variance",
+    revisit_optimizer_max_translation_variance_);
+  get_parameter(
+    "revisit_optimizer_max_yaw_variance",
+    revisit_optimizer_max_yaw_variance_);
+  get_parameter(
+    "revisit_optimizer_max_current_translation_residual_m",
+    revisit_optimizer_max_current_translation_residual_m_);
+  double revisit_optimizer_max_current_yaw_residual_deg = -1.0;
+  get_parameter(
+    "revisit_optimizer_max_current_yaw_residual_deg",
+    revisit_optimizer_max_current_yaw_residual_deg);
+  revisit_optimizer_min_state_id_separation_ =
+    std::max(revisit_optimizer_min_state_id_separation_, 2);
+  revisit_optimizer_min_time_separation_s_ =
+    std::max(revisit_optimizer_min_time_separation_s_, 0.0);
+  revisit_optimizer_max_translation_variance_ =
+    std::max(revisit_optimizer_max_translation_variance_, 0.0);
+  revisit_optimizer_max_yaw_variance_ =
+    std::max(revisit_optimizer_max_yaw_variance_, 0.0);
+  revisit_optimizer_max_current_yaw_residual_rad_ =
+    revisit_optimizer_max_current_yaw_residual_deg < 0.0 ?
+    -1.0 : revisit_optimizer_max_current_yaw_residual_deg * M_PI / 180.0;
+  attachLoopClosureDiagnostics();
   loadRoughnessAnchorParameters();
   if (enable_constraints_ && constraints_loaded_) {
     anchor_timer_ = create_wall_timer(
@@ -211,11 +360,291 @@ void RoughnessAnchorSlamToolbox::configure()
   }
 }
 
+void RoughnessAnchorSlamToolbox::loadPoseGraphByParams()
+{
+  const bool restore_diagnostics = detachLoopClosureDiagnostics();
+  try {
+    slam_toolbox::SynchronousSlamToolbox::loadPoseGraphByParams();
+  } catch (...) {
+    if (restore_diagnostics) {
+      attachLoopClosureDiagnostics();
+    }
+    throw;
+  }
+
+  if (optimize_loaded_pose_graph_once_) {
+    optimizeLoadedPoseGraphOnce();
+  }
+  if (restore_diagnostics) {
+    attachLoopClosureDiagnostics();
+  }
+}
+
 void RoughnessAnchorSlamToolbox::laserCallback(
   sensor_msgs::msg::LaserScan::ConstSharedPtr scan)
 {
   slam_toolbox::SynchronousSlamToolbox::laserCallback(scan);
   cacheConstraintScan(scan);
+}
+
+bool RoughnessAnchorSlamToolbox::serializePoseGraphCallback(
+  const std::shared_ptr<rmw_request_id_t> request_header,
+  const std::shared_ptr<slam_toolbox::srv::SerializePoseGraph::Request> req,
+  std::shared_ptr<slam_toolbox::srv::SerializePoseGraph::Response> resp)
+{
+  const bool restore_diagnostics = detachLoopClosureDiagnostics();
+  try {
+    const bool result =
+      slam_toolbox::SynchronousSlamToolbox::serializePoseGraphCallback(
+      request_header, req, resp);
+    if (restore_diagnostics) {
+      attachLoopClosureDiagnostics();
+    }
+    return result;
+  } catch (...) {
+    if (restore_diagnostics) {
+      attachLoopClosureDiagnostics();
+    }
+    throw;
+  }
+}
+
+bool RoughnessAnchorSlamToolbox::deserializePoseGraphCallback(
+  const std::shared_ptr<rmw_request_id_t> request_header,
+  const std::shared_ptr<slam_toolbox::srv::DeserializePoseGraph::Request> req,
+  std::shared_ptr<slam_toolbox::srv::DeserializePoseGraph::Response> resp)
+{
+  const bool restore_diagnostics = detachLoopClosureDiagnostics();
+  try {
+    const bool result =
+      slam_toolbox::SynchronousSlamToolbox::deserializePoseGraphCallback(
+      request_header, req, resp);
+    if (restore_diagnostics) {
+      attachLoopClosureDiagnostics();
+    }
+    return result;
+  } catch (...) {
+    if (restore_diagnostics) {
+      attachLoopClosureDiagnostics();
+    }
+    throw;
+  }
+}
+
+void RoughnessAnchorSlamToolbox::attachLoopClosureDiagnostics()
+{
+  if (!enable_loop_closure_diagnostics_ || loop_closure_diagnostics_attached_) {
+    return;
+  }
+
+  boost::mutex::scoped_lock lock(smapper_mutex_);
+  if (!smapper_ || !smapper_->getMapper()) {
+    RCLCPP_WARN(get_logger(), "KARTO_LOOP_DIAG phase=registration_failed mapper=null");
+    return;
+  }
+
+  auto * mapper = smapper_->getMapper();
+  mapper->AddListener(&loopClosureDiagnostics());
+  loop_closure_diagnostics_attached_ = true;
+  RCLCPP_INFO(
+    get_logger(),
+    "KARTO_LOOP_DIAG phase=registered loop_search_maximum_distance=%.6f "
+    "coarse_threshold=%.6f fine_threshold=%.6f chain_size=%d",
+    mapper->getParamLoopSearchMaximumDistance(),
+    mapper->getParamLoopMatchMinimumResponseCoarse(),
+    mapper->getParamLoopMatchMinimumResponseFine(),
+    mapper->getParamLoopMatchMinimumChainSize());
+}
+
+bool RoughnessAnchorSlamToolbox::detachLoopClosureDiagnostics()
+{
+  if (!loop_closure_diagnostics_attached_) {
+    return false;
+  }
+
+  boost::mutex::scoped_lock lock(smapper_mutex_);
+  if (smapper_ && smapper_->getMapper()) {
+    smapper_->getMapper()->RemoveListener(&loopClosureDiagnostics());
+  }
+  loop_closure_diagnostics_attached_ = false;
+  return true;
+}
+
+void RoughnessAnchorSlamToolbox::optimizeLoadedPoseGraphOnce()
+{
+  std::vector<karto::Pose2> poses_before;
+  std::vector<karto::LocalizedRangeScan *> scans;
+  std::size_t edge_count = 0;
+  const auto started_at = std::chrono::steady_clock::now();
+
+  {
+    boost::mutex::scoped_lock lock(smapper_mutex_);
+    if (
+      !smapper_ || !smapper_->getMapper() ||
+      !smapper_->getMapper()->GetGraph() ||
+      !smapper_->getMapper()->getScanSolver())
+    {
+      RCLCPP_WARN(
+        get_logger(),
+        "REVISIT_OPT_DIAG mode=loaded_once result=skipped reason=missing_mapper_graph_or_solver");
+      return;
+    }
+
+    auto * mapper = smapper_->getMapper();
+    const auto & vertices_by_sensor = mapper->GetGraph()->GetVertices();
+    for (const auto & sensor_vertices : vertices_by_sensor) {
+      for (const auto & id_vertex : sensor_vertices.second) {
+        auto * scan = id_vertex.second ? id_vertex.second->GetObject() : nullptr;
+        if (!scan) {
+          continue;
+        }
+        scans.push_back(scan);
+        poses_before.push_back(scan->GetCorrectedPose());
+      }
+    }
+    edge_count = mapper->GetGraph()->GetEdges().size();
+    if (scans.empty()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "REVISIT_OPT_DIAG mode=loaded_once result=skipped reason=empty_pose_graph");
+      return;
+    }
+
+    const RevisitConstraintFilterStats filter_stats = filterLongRevisitConstraints();
+    RCLCPP_INFO(
+      get_logger(),
+      "REVISIT_OPT_DIAG mode=loaded_once phase=constraint_filter enabled=%s "
+      "inspected=%zu long=%zu kept=%zu removed=%zu invalid=%zu "
+      "min_state_gap=%d min_time_gap_s=%.3f max_translation_variance=%.6f "
+      "max_yaw_variance=%.6f max_current_translation_residual_m=%.6f "
+      "max_current_yaw_residual_deg=%.6f",
+      revisit_optimizer_filter_long_edges_ ? "true" : "false",
+      filter_stats.inspected_edges,
+      filter_stats.long_edges,
+      filter_stats.kept_long_edges,
+      filter_stats.removed_long_edges,
+      filter_stats.invalid_edges,
+      revisit_optimizer_min_state_id_separation_,
+      revisit_optimizer_min_time_separation_s_,
+      revisit_optimizer_max_translation_variance_,
+      revisit_optimizer_max_yaw_variance_,
+      revisit_optimizer_max_current_translation_residual_m_,
+      revisit_optimizer_max_current_yaw_residual_rad_ < 0.0 ?
+      -1.0 : revisit_optimizer_max_current_yaw_residual_rad_ * 180.0 / M_PI);
+    mapper->CorrectPoses();
+  }
+
+  std::vector<double> translation_corrections_m;
+  std::vector<double> yaw_corrections_deg;
+  translation_corrections_m.reserve(scans.size());
+  yaw_corrections_deg.reserve(scans.size());
+  for (std::size_t i = 0; i < scans.size(); ++i) {
+    const karto::Pose2 pose_after = scans[i]->GetCorrectedPose();
+    translation_corrections_m.push_back(
+      poseTranslationDistance(poses_before[i], pose_after));
+    yaw_corrections_deg.push_back(
+      std::abs(
+        normalizedAngle(
+          pose_after.GetHeading() - poses_before[i].GetHeading())) * 180.0 / M_PI);
+  }
+
+  const double elapsed_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started_at).count();
+  RCLCPP_INFO(
+    get_logger(),
+    "REVISIT_OPT_DIAG mode=loaded_once result=optimized nodes=%zu edges=%zu "
+    "translation_correction_m_p50=%.6f p95=%.6f max=%.6f "
+    "yaw_correction_deg_p50=%.6f p95=%.6f max=%.6f elapsed_ms=%.3f",
+    scans.size(),
+    edge_count,
+    quantile(translation_corrections_m, 0.50),
+    quantile(translation_corrections_m, 0.95),
+    quantile(translation_corrections_m, 1.00),
+    quantile(yaw_corrections_deg, 0.50),
+    quantile(yaw_corrections_deg, 0.95),
+    quantile(yaw_corrections_deg, 1.00),
+    elapsed_ms);
+  updateMap();
+}
+
+RoughnessAnchorSlamToolbox::RevisitConstraintFilterStats
+RoughnessAnchorSlamToolbox::filterLongRevisitConstraints()
+{
+  RevisitConstraintFilterStats stats;
+  if (
+    !revisit_optimizer_filter_long_edges_ ||
+    !smapper_ || !smapper_->getMapper() ||
+    !smapper_->getMapper()->GetGraph() ||
+    !smapper_->getMapper()->getScanSolver())
+  {
+    return stats;
+  }
+
+  auto * solver = smapper_->getMapper()->getScanSolver();
+  const auto & edges = smapper_->getMapper()->GetGraph()->GetEdges();
+  for (auto * edge : edges) {
+    ++stats.inspected_edges;
+    if (!edge || !edge->GetSource() || !edge->GetTarget()) {
+      ++stats.invalid_edges;
+      continue;
+    }
+    auto * source_scan = edge->GetSource()->GetObject();
+    auto * target_scan = edge->GetTarget()->GetObject();
+    auto * link = dynamic_cast<karto::LinkInfo *>(edge->GetLabel());
+    if (!source_scan || !target_scan || !link) {
+      ++stats.invalid_edges;
+      continue;
+    }
+
+    const int state_gap = std::abs(
+      source_scan->GetStateId() - target_scan->GetStateId());
+    const double time_gap_s = std::abs(
+      source_scan->GetTime() - target_scan->GetTime());
+    if (
+      state_gap < revisit_optimizer_min_state_id_separation_ ||
+      time_gap_s < revisit_optimizer_min_time_separation_s_)
+    {
+      continue;
+    }
+    ++stats.long_edges;
+
+    const karto::Matrix3 covariance = link->GetCovariance();
+    const karto::Pose2 measured = link->GetPoseDifference();
+    const karto::Pose2 predicted = relativePose(
+      source_scan->GetCorrectedPose(), target_scan->GetCorrectedPose());
+    const double translation_residual_m = std::hypot(
+      measured.GetX() - predicted.GetX(),
+      measured.GetY() - predicted.GetY());
+    const double yaw_residual_rad = std::abs(
+      normalizedAngle(
+        measured.GetHeading() - predicted.GetHeading()));
+    const bool covariance_gate_failed =
+      !std::isfinite(covariance(0, 0)) ||
+      !std::isfinite(covariance(1, 1)) ||
+      !std::isfinite(covariance(2, 2)) ||
+      covariance(0, 0) > revisit_optimizer_max_translation_variance_ ||
+      covariance(1, 1) > revisit_optimizer_max_translation_variance_ ||
+      covariance(2, 2) > revisit_optimizer_max_yaw_variance_;
+    const bool translation_residual_gate_failed =
+      revisit_optimizer_max_current_translation_residual_m_ >= 0.0 &&
+      translation_residual_m >
+      revisit_optimizer_max_current_translation_residual_m_;
+    const bool yaw_residual_gate_failed =
+      revisit_optimizer_max_current_yaw_residual_rad_ >= 0.0 &&
+      yaw_residual_rad > revisit_optimizer_max_current_yaw_residual_rad_;
+    if (
+      covariance_gate_failed ||
+      translation_residual_gate_failed ||
+      yaw_residual_gate_failed)
+    {
+      solver->RemoveConstraint(
+        source_scan->GetUniqueId(), target_scan->GetUniqueId());
+      ++stats.removed_long_edges;
+    } else {
+      ++stats.kept_long_edges;
+    }
+  }
+  return stats;
 }
 
 void RoughnessAnchorSlamToolbox::loadRoughnessAnchorParameters()

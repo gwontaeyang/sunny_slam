@@ -1,0 +1,16 @@
+enabled: true
+voxel_size_m: 0.22
+min_hit_observations: 3
+min_observation_span_s: 1.0
+min_viewpoint_distance_m: 0.6
+ray_clearing_enabled: true
+ray_endpoint_margin_m: 0.45
+max_ray_length_m: 30.0
+max_rays_per_observation: 2000
+prior_free_enabled: true
+min_prior_free_observations: 4
+max_prior_free_observations: 8
+prior_free_max_sensor_vertical_drop_m: 0.9
+promotion_min_hit_ratio: 0.35
+retention_min_hit_ratio: 0.3
+min_miss_observations_for_demotion: 4

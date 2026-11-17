@@ -1,0 +1,5 @@
+hesai_pointcloud_ingest:
+  ros__parameters:
+    # Raw contract validation still sees every point. Only normalized output
+    # is bounded; original timestamps/rings are retained for downstream deskew.
+    max_output_points: 4000

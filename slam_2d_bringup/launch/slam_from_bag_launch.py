@@ -4,15 +4,22 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    LogInfo,
+    OpaqueFunction,
+    TimerAction,
+)
 from launch.actions import EmitEvent
 from launch.conditions import IfCondition
 from launch.events import matches_action
-from launch.substitutions import AndSubstitution, LaunchConfiguration
+from launch.substitutions import AndSubstitution, IfElseSubstitution, LaunchConfiguration
 from launch.substitutions import NotSubstitution, PythonExpression
 from launch_ros.actions import LifecycleNode, Node
 from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
+from rclpy.expand_topic_name import expand_topic_name
 
 
 SLAM_BAG_PLAY_TOPICS_WITH_CLOUD = [
@@ -40,72 +47,131 @@ SLAM_BAG_PLAY_TOPICS_LASERSCAN_ONLY = [
 ]
 
 
+def slam_toolbox_scan_topic_substitution(
+        scan_topic,
+        slam_scan_topic):
+    is_configured = PythonExpression(
+        ["'", slam_scan_topic, "' != ''"])
+    return IfElseSubstitution(
+        is_configured,
+        if_value=slam_scan_topic,
+        else_value=scan_topic,
+    )
+
+
+def validate_custom_slam_toolbox_selection(context):
+    anchor_enabled = LaunchConfiguration(
+        'use_roughness_anchor_slam_toolbox').perform(context)
+    innovation_enabled = LaunchConfiguration(
+        'use_roughness_innovation_slam_toolbox').perform(context)
+    truthy = {'1', 'true', 'yes', 'on'}
+    if (
+            anchor_enabled.strip().lower() in truthy
+            and innovation_enabled.strip().lower() in truthy):
+        raise RuntimeError(
+            'use_roughness_anchor_slam_toolbox and '
+            'use_roughness_innovation_slam_toolbox are mutually exclusive')
+    return []
+
+
+def validate_roughness_innovation_playback_topics(context):
+    truthy = {'1', 'true', 'yes', 'on'}
+    enabled = LaunchConfiguration(
+        'use_roughness_innovation_slam_toolbox').perform(context)
+    restricted = LaunchConfiguration('play_slam_topics_only').perform(context)
+    if (
+            enabled.strip().lower() not in truthy
+            or restricted.strip().lower() not in truthy):
+        return []
+    imu_topic = expand_topic_name(
+        LaunchConfiguration('roughness_innovation_imu_topic').perform(context),
+        'slam_toolbox',
+        '/',
+    )
+    with_cloud = LaunchConfiguration(
+        'start_pointcloud_projection').perform(context)
+    allowed_topics = (
+        SLAM_BAG_PLAY_TOPICS_WITH_CLOUD
+        if with_cloud.strip().lower() in truthy
+        else SLAM_BAG_PLAY_TOPICS_LASERSCAN_ONLY
+    )
+    if imu_topic not in allowed_topics:
+        raise RuntimeError(
+            f"roughness_innovation_imu_topic '{imu_topic}' is excluded by "
+            "play_slam_topics_only; add it to the launch topic contract or "
+            "set play_slam_topics_only:=false"
+        )
+    return []
+
+
+def validate_roughness_innovation_dependencies(context):
+    truthy = {'1', 'true', 'yes', 'on'}
+    custom_enabled = LaunchConfiguration(
+        'use_roughness_innovation_slam_toolbox'
+    ).perform(context).strip().lower() in truthy
+    near_chain_enabled = LaunchConfiguration(
+        'roughness_innovation_enable_near_chain_gate'
+    ).perform(context).strip().lower() in truthy
+    spatial_memory_enabled = LaunchConfiguration(
+        'roughness_innovation_enable_spatial_memory_gate'
+    ).perform(context).strip().lower() in truthy
+    pose_graph_anchors_raw = LaunchConfiguration(
+        'roughness_innovation_spatial_memory_use_pose_graph_anchors',
+        default='false'
+    ).perform(context).strip().lower()
+    if pose_graph_anchors_raw not in truthy | {'0', 'false', 'no', 'off'}:
+        raise RuntimeError(
+            'roughness_innovation_spatial_memory_use_pose_graph_anchors '
+            'must be a boolean')
+    pose_graph_anchors_enabled = pose_graph_anchors_raw in truthy
+    spatial_passage_enabled = LaunchConfiguration(
+        'roughness_innovation_enable_spatial_passage_hysteresis'
+    ).perform(context).strip().lower() in truthy
+    if (
+            near_chain_enabled
+            or spatial_memory_enabled
+            or pose_graph_anchors_enabled
+            or spatial_passage_enabled
+            ) and not custom_enabled:
+        raise RuntimeError(
+            'roughness innovation near-chain, spatial memory, and passage '
+            'features require use_roughness_innovation_slam_toolbox')
+    if spatial_memory_enabled and not near_chain_enabled:
+        raise RuntimeError(
+            'roughness_innovation_enable_spatial_memory_gate requires '
+            'roughness_innovation_enable_near_chain_gate')
+    if pose_graph_anchors_enabled and not spatial_memory_enabled:
+        raise RuntimeError(
+            'roughness_innovation_spatial_memory_use_pose_graph_anchors '
+            'requires roughness_innovation_enable_spatial_memory_gate')
+    if spatial_passage_enabled and (
+            not near_chain_enabled or not spatial_memory_enabled):
+        raise RuntimeError(
+            'roughness_innovation_enable_spatial_passage_hysteresis requires '
+            'roughness_innovation_enable_near_chain_gate and '
+            'roughness_innovation_enable_spatial_memory_gate')
+    return []
+
+
 def generate_launch_description():
     slam_2d_bringup_dir = get_package_share_directory('slam_2d_bringup')
 
     bag_file = LaunchConfiguration('bag_file')
+    params_file = LaunchConfiguration('params_file')
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     start_slam = LaunchConfiguration('start_slam', default='true')
     scan_topic = LaunchConfiguration('scan_topic', default='/scan_laserscan')
-    slam_scan_topic = LaunchConfiguration('slam_scan_topic', default='/scan_laserscan')
+    slam_scan_topic = LaunchConfiguration(
+        'slam_scan_topic',
+        default='')
     cloud_topic = LaunchConfiguration('cloud_topic', default='/scan')
     start_pointcloud_projection = LaunchConfiguration(
         'start_pointcloud_projection',
         default='false')
-    enable_laserscan_roughness_gate = LaunchConfiguration(
-        'enable_laserscan_roughness_gate',
-        default='false')
-    laserscan_roughness_gate_mode = LaunchConfiguration(
-        'laserscan_roughness_gate_mode',
-        default='drop')
-    laserscan_roughness_use_nearest_imu_sample = LaunchConfiguration(
-        'laserscan_roughness_use_nearest_imu_sample',
-        default='true')
-    laserscan_roughness_imu_buffer_duration_s = LaunchConfiguration(
-        'laserscan_roughness_imu_buffer_duration_s',
-        default='1.0')
-    laserscan_roughness_stabilize_max_source_age_s = LaunchConfiguration(
-        'laserscan_roughness_stabilize_max_source_age_s',
-        default='0.35')
-    laserscan_roughness_stabilize_max_event_duration_s = LaunchConfiguration(
-        'laserscan_roughness_stabilize_max_event_duration_s',
-        default='0.5')
-    laserscan_roughness_stabilize_min_publish_period_s = LaunchConfiguration(
-        'laserscan_roughness_stabilize_min_publish_period_s',
-        default='0.1')
-    laserscan_roughness_stabilize_max_translation_m = LaunchConfiguration(
-        'laserscan_roughness_stabilize_max_translation_m',
-        default='0.2')
-    laserscan_roughness_stabilize_max_yaw_rad = LaunchConfiguration(
-        'laserscan_roughness_stabilize_max_yaw_rad',
-        default='0.15')
-    laserscan_roughness_stabilize_max_roll_pitch_rad = LaunchConfiguration(
-        'laserscan_roughness_stabilize_max_roll_pitch_rad',
-        default='0.05')
-    laserscan_roughness_stabilize_min_cached_valid_ratio = LaunchConfiguration(
-        'laserscan_roughness_stabilize_min_cached_valid_ratio',
-        default='0.2')
-    laserscan_roughness_stabilize_min_output_valid_ratio = LaunchConfiguration(
-        'laserscan_roughness_stabilize_min_output_valid_ratio',
-        default='0.15')
-    laserscan_roughness_stabilize_min_output_valid_beams = LaunchConfiguration(
-        'laserscan_roughness_stabilize_min_output_valid_beams',
-        default='20')
-    laserscan_roughness_stabilize_fallback_mode = LaunchConfiguration(
-        'laserscan_roughness_stabilize_fallback_mode',
-        default='drop')
-    laserscan_roughness_stabilize_require_return_revisit = LaunchConfiguration(
-        'laserscan_roughness_stabilize_require_return_revisit',
-        default='false')
-    laserscan_roughness_adaptive_use_travel_heading = LaunchConfiguration(
-        'laserscan_roughness_adaptive_use_travel_heading',
-        default='false')
-    laserscan_roughness_adaptive_min_travel_distance_m = LaunchConfiguration(
-        'laserscan_roughness_adaptive_min_travel_distance_m',
-        default='0.25')
-    laserscan_roughness_adaptive_travel_heading_window_s = LaunchConfiguration(
-        'laserscan_roughness_adaptive_travel_heading_window_s',
-        default='4.0')
+    slam_toolbox_scan_topic = slam_toolbox_scan_topic_substitution(
+        scan_topic,
+        slam_scan_topic,
+    )
     projection_min_z = LaunchConfiguration(
         'projection_min_z',
         default='-0.25')
@@ -139,81 +205,6 @@ def generate_launch_description():
     projection_max_scan_tf_lag_s = LaunchConfiguration(
         'projection_max_scan_tf_lag_s',
         default='0.2')
-    projection_enable_gravity_alignment = LaunchConfiguration(
-        'projection_enable_gravity_alignment',
-        default='false')
-    projection_gravity_max_scan_imu_dt_s = LaunchConfiguration(
-        'projection_gravity_max_scan_imu_dt_s',
-        default='0.05')
-    projection_gravity_roll_scale = LaunchConfiguration(
-        'projection_gravity_roll_scale',
-        default='1.0')
-    projection_gravity_pitch_scale = LaunchConfiguration(
-        'projection_gravity_pitch_scale',
-        default='1.0')
-    projection_enable_imu_roughness_gate = LaunchConfiguration(
-        'projection_enable_imu_roughness_gate',
-        default='true')
-    projection_imu_topic = LaunchConfiguration(
-        'projection_imu_topic',
-        default='/imu/data')
-    projection_roughness_tilt_threshold_deg = LaunchConfiguration(
-        'projection_roughness_tilt_threshold_deg',
-        default='2.0')
-    projection_roughness_gyro_xy_threshold_rad_s = LaunchConfiguration(
-        'projection_roughness_gyro_xy_threshold_rad_s',
-        default='0.05')
-    projection_roughness_accel_norm_deviation_threshold_m_s2 = LaunchConfiguration(
-        'projection_roughness_accel_norm_deviation_threshold_m_s2',
-        default='0.35')
-    projection_roughness_tilt_rate_threshold_deg_s = LaunchConfiguration(
-        'projection_roughness_tilt_rate_threshold_deg_s',
-        default='5.0')
-    projection_roughness_accel_norm_rate_threshold_m_s3 = LaunchConfiguration(
-        'projection_roughness_accel_norm_rate_threshold_m_s3',
-        default='80.0')
-    projection_roughness_max_scan_imu_dt_s = LaunchConfiguration(
-        'projection_roughness_max_scan_imu_dt_s',
-        default='0.2')
-    projection_roughness_hold_duration_s = LaunchConfiguration(
-        'projection_roughness_hold_duration_s',
-        default='0.35')
-    projection_roughness_hard_hold_duration_s = LaunchConfiguration(
-        'projection_roughness_hard_hold_duration_s',
-        default='0.0')
-    projection_roughness_score_gate = LaunchConfiguration(
-        'projection_roughness_score_gate',
-        default='1.0')
-    projection_roughness_score_hard_gate = LaunchConfiguration(
-        'projection_roughness_score_hard_gate',
-        default='2.0')
-    projection_roughness_gate_mode = LaunchConfiguration(
-        'projection_roughness_gate_mode',
-        default='drop')
-    projection_roughness_throttle_min_publish_period_s = LaunchConfiguration(
-        'projection_roughness_throttle_min_publish_period_s',
-        default='0.5')
-    projection_roughness_throttle_drop_hard = LaunchConfiguration(
-        'projection_roughness_throttle_drop_hard',
-        default='true')
-    projection_roughness_max_continuous_drop_duration_s = LaunchConfiguration(
-        'projection_roughness_max_continuous_drop_duration_s',
-        default='0.0')
-    projection_roughness_adaptive_require_return_revisit = LaunchConfiguration(
-        'projection_roughness_adaptive_require_return_revisit',
-        default='true')
-    projection_roughness_adaptive_revisit_radius_m = LaunchConfiguration(
-        'projection_roughness_adaptive_revisit_radius_m',
-        default='0.8')
-    projection_roughness_adaptive_min_separation_s = LaunchConfiguration(
-        'projection_roughness_adaptive_min_separation_s',
-        default='20.0')
-    projection_roughness_adaptive_min_heading_delta_rad = LaunchConfiguration(
-        'projection_roughness_adaptive_min_heading_delta_rad',
-        default='2.2')
-    projection_roughness_adaptive_history_duration_s = LaunchConfiguration(
-        'projection_roughness_adaptive_history_duration_s',
-        default='900.0')
     projection_enable_scan_quality_gate = LaunchConfiguration(
         'projection_enable_scan_quality_gate',
         default='false')
@@ -248,6 +239,138 @@ def generate_launch_description():
     use_roughness_anchor_slam_toolbox = LaunchConfiguration(
         'use_roughness_anchor_slam_toolbox',
         default='false')
+    use_roughness_innovation_slam_toolbox = LaunchConfiguration(
+        'use_roughness_innovation_slam_toolbox',
+        default='true')
+    roughness_innovation_mode = LaunchConfiguration(
+        'roughness_innovation_mode',
+        default='observe')
+    roughness_innovation_imu_topic = LaunchConfiguration(
+        'roughness_innovation_imu_topic',
+        default='/imu/data')
+    roughness_innovation_scan_qos_reliable = LaunchConfiguration(
+        'roughness_innovation_scan_qos_reliable',
+        default='false')
+    roughness_innovation_scan_qos_depth = LaunchConfiguration(
+        'roughness_innovation_scan_qos_depth',
+        default='5')
+    roughness_innovation_window_before_s = LaunchConfiguration(
+        'roughness_innovation_window_before_s',
+        default='0.10')
+    roughness_innovation_window_after_s = LaunchConfiguration(
+        'roughness_innovation_window_after_s',
+        default='0.10')
+    roughness_innovation_score_gate = LaunchConfiguration(
+        'roughness_innovation_score_gate',
+        default='2.75')
+    roughness_innovation_min_rough_samples = LaunchConfiguration(
+        'roughness_innovation_min_rough_samples',
+        default='3')
+    roughness_innovation_min_rough_duration_s = LaunchConfiguration(
+        'roughness_innovation_min_rough_duration_s',
+        default='0.02')
+    roughness_innovation_translation_gate_m = LaunchConfiguration(
+        'roughness_innovation_translation_gate_m',
+        default='0.04')
+    roughness_innovation_yaw_gate_deg = LaunchConfiguration(
+        'roughness_innovation_yaw_gate_deg',
+        default='3.0')
+    roughness_innovation_enable_near_chain_gate = LaunchConfiguration(
+        'roughness_innovation_enable_near_chain_gate',
+        default='false')
+    roughness_innovation_near_chain_recovery_duration_s = LaunchConfiguration(
+        'roughness_innovation_near_chain_recovery_duration_s',
+        default='2.0')
+    roughness_innovation_near_chain_loop_closing_cooldown_s = (
+        LaunchConfiguration(
+            'roughness_innovation_near_chain_loop_closing_cooldown_s',
+            default='0.0')
+    )
+    roughness_innovation_near_chain_min_rough_samples = LaunchConfiguration(
+        'roughness_innovation_near_chain_min_rough_samples',
+        default='1')
+    roughness_innovation_near_chain_gated_min_response = LaunchConfiguration(
+        'roughness_innovation_near_chain_gated_min_response',
+        default='1.1')
+    roughness_innovation_disable_loop_closing_during_gate = LaunchConfiguration(
+        'roughness_innovation_disable_loop_closing_during_gate',
+        default='false')
+    roughness_innovation_enable_spatial_memory_gate = LaunchConfiguration(
+        'roughness_innovation_enable_spatial_memory_gate',
+        default='false')
+    roughness_innovation_spatial_memory_use_pose_graph_anchors = (
+        LaunchConfiguration(
+            'roughness_innovation_spatial_memory_use_pose_graph_anchors',
+            default='false')
+    )
+    roughness_innovation_spatial_memory_radius_m = LaunchConfiguration(
+        'roughness_innovation_spatial_memory_radius_m',
+        default='0.6')
+    roughness_innovation_spatial_memory_min_revisit_separation_s = (
+        LaunchConfiguration(
+            'roughness_innovation_spatial_memory_min_revisit_separation_s',
+            default='20.0')
+    )
+    roughness_innovation_spatial_memory_min_heading_delta_deg = (
+        LaunchConfiguration(
+            'roughness_innovation_spatial_memory_min_heading_delta_deg',
+            default='126.0')
+    )
+    roughness_innovation_spatial_memory_merge_radius_m = LaunchConfiguration(
+        'roughness_innovation_spatial_memory_merge_radius_m',
+        default='0.10')
+    roughness_innovation_spatial_memory_max_zones = LaunchConfiguration(
+        'roughness_innovation_spatial_memory_max_zones',
+        default='200')
+    roughness_innovation_enable_spatial_passage_hysteresis = (
+        LaunchConfiguration(
+            'roughness_innovation_enable_spatial_passage_hysteresis',
+            default='false')
+    )
+    roughness_innovation_spatial_passage_radius_m = LaunchConfiguration(
+        'roughness_innovation_spatial_passage_radius_m',
+        default='0.55')
+    roughness_innovation_spatial_passage_max_age_s = LaunchConfiguration(
+        'roughness_innovation_spatial_passage_max_age_s',
+        default='3.5')
+    roughness_innovation_enable_post_confirmation = LaunchConfiguration(
+        'roughness_innovation_enable_post_confirmation',
+        default='true')
+    roughness_innovation_post_confirmation_max_age_s = LaunchConfiguration(
+        'roughness_innovation_post_confirmation_max_age_s',
+        default='2.0')
+    roughness_innovation_post_confirmation_min_base_scans = LaunchConfiguration(
+        'roughness_innovation_post_confirmation_min_base_scans',
+        default='8')
+    roughness_innovation_post_confirmation_max_base_scans = LaunchConfiguration(
+        'roughness_innovation_post_confirmation_max_base_scans',
+        default='10')
+    roughness_innovation_post_confirmation_min_response = LaunchConfiguration(
+        'roughness_innovation_post_confirmation_min_response',
+        default='0.30')
+    roughness_innovation_post_confirmation_min_response_gain = (
+        LaunchConfiguration(
+            'roughness_innovation_post_confirmation_min_response_gain',
+            default='0.05')
+    )
+    roughness_innovation_post_confirmation_min_covariance_improvement_ratio = (
+        LaunchConfiguration(
+            'roughness_innovation_post_confirmation_min_covariance_improvement_ratio',
+            default='1.5')
+    )
+    roughness_innovation_post_confirmation_translation_disagreement_gate_m = (
+        LaunchConfiguration(
+            'roughness_innovation_post_confirmation_translation_disagreement_gate_m',
+            default='0.03')
+    )
+    roughness_innovation_post_confirmation_yaw_disagreement_gate_deg = (
+        LaunchConfiguration(
+            'roughness_innovation_post_confirmation_yaw_disagreement_gate_deg',
+            default='1.0')
+    )
+    roughness_innovation_experimental_reject_scan_stamps_ns = LaunchConfiguration(
+        'roughness_innovation_experimental_reject_scan_stamps_ns',
+        default='')
     roughness_anchor_constraints_csv = LaunchConfiguration(
         'roughness_anchor_constraints_csv',
         default='')
@@ -292,6 +415,15 @@ def generate_launch_description():
         default_value='',
         description='Path to the bag file to play (leave empty to skip bag playback)'
     )
+    declare_params_file = DeclareLaunchArgument(
+        'params_file',
+        default_value=os.path.join(
+            slam_2d_bringup_dir,
+            'config',
+            'mapper_params.yaml',
+        ),
+        description='Path to the slam_toolbox params YAML file'
+    )
 
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
@@ -313,8 +445,10 @@ def generate_launch_description():
 
     declare_slam_scan_topic = DeclareLaunchArgument(
         'slam_scan_topic',
-        default_value='/scan_laserscan',
-        description='LaserScan topic consumed directly by slam_toolbox'
+        default_value='',
+        description=(
+            'Optional slam_toolbox LaserScan override. When empty, use '
+            'scan_topic.')
     )
 
     declare_cloud_topic = DeclareLaunchArgument(
@@ -328,71 +462,6 @@ def generate_launch_description():
         default_value='false',
         description='Start PointCloud2 to LaserScan projection for bags without LaserScan'
     )
-
-    declare_enable_laserscan_roughness_gate = DeclareLaunchArgument(
-        'enable_laserscan_roughness_gate',
-        default_value='false',
-        description='Filter the LaserScan stream for SLAM using the IMU roughness gate'
-    )
-
-    declare_laserscan_roughness_gate_mode = DeclareLaunchArgument(
-        'laserscan_roughness_gate_mode',
-        default_value='drop',
-        description='LaserScan roughness policy, independent of point-cloud projection'
-    )
-    declare_laserscan_roughness_use_nearest_imu_sample = DeclareLaunchArgument(
-        'laserscan_roughness_use_nearest_imu_sample',
-        default_value='true',
-        description='Use the nearest buffered IMU sample when gating LaserScan input'
-    )
-
-    declare_laserscan_roughness_imu_buffer_duration_s = DeclareLaunchArgument(
-        'laserscan_roughness_imu_buffer_duration_s',
-        default_value='1.0',
-        description='IMU history duration for LaserScan roughness gating'
-    )
-    declare_laserscan_roughness_stabilize_max_source_age_s = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_max_source_age_s',
-        default_value='0.35')
-    declare_laserscan_roughness_stabilize_max_event_duration_s = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_max_event_duration_s',
-        default_value='0.5')
-    declare_laserscan_roughness_stabilize_min_publish_period_s = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_min_publish_period_s',
-        default_value='0.1')
-    declare_laserscan_roughness_stabilize_max_translation_m = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_max_translation_m',
-        default_value='0.2')
-    declare_laserscan_roughness_stabilize_max_yaw_rad = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_max_yaw_rad',
-        default_value='0.15')
-    declare_laserscan_roughness_stabilize_max_roll_pitch_rad = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_max_roll_pitch_rad',
-        default_value='0.05')
-    declare_laserscan_roughness_stabilize_min_cached_valid_ratio = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_min_cached_valid_ratio',
-        default_value='0.2')
-    declare_laserscan_roughness_stabilize_min_output_valid_ratio = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_min_output_valid_ratio',
-        default_value='0.15')
-    declare_laserscan_roughness_stabilize_min_output_valid_beams = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_min_output_valid_beams',
-        default_value='20')
-    declare_laserscan_roughness_stabilize_fallback_mode = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_fallback_mode',
-        default_value='drop')
-    declare_laserscan_roughness_stabilize_require_return_revisit = DeclareLaunchArgument(
-        'laserscan_roughness_stabilize_require_return_revisit',
-        default_value='false')
-    declare_laserscan_roughness_adaptive_use_travel_heading = DeclareLaunchArgument(
-        'laserscan_roughness_adaptive_use_travel_heading',
-        default_value='false')
-    declare_laserscan_roughness_adaptive_min_travel_distance_m = DeclareLaunchArgument(
-        'laserscan_roughness_adaptive_min_travel_distance_m',
-        default_value='0.25')
-    declare_laserscan_roughness_adaptive_travel_heading_window_s = DeclareLaunchArgument(
-        'laserscan_roughness_adaptive_travel_heading_window_s',
-        default_value='4.0')
 
     declare_projection_min_z = DeclareLaunchArgument(
         'projection_min_z',
@@ -467,161 +536,6 @@ def generate_launch_description():
         'projection_max_scan_tf_lag_s',
         default_value='0.2',
         description='Allowed projected scan lead over the latest dynamic base TF stamp'
-    )
-
-    declare_projection_enable_gravity_alignment = DeclareLaunchArgument(
-        'projection_enable_gravity_alignment',
-        default_value='false',
-        description='Apply IMU roll/pitch compensation before projected LaserScan height filtering'
-    )
-
-    declare_projection_gravity_max_scan_imu_dt_s = DeclareLaunchArgument(
-        'projection_gravity_max_scan_imu_dt_s',
-        default_value='0.05',
-        description='Maximum scan-to-IMU timestamp difference for projection gravity alignment'
-    )
-
-    declare_projection_gravity_roll_scale = DeclareLaunchArgument(
-        'projection_gravity_roll_scale',
-        default_value='1.0',
-        description='Scale applied to IMU roll before projection gravity alignment'
-    )
-
-    declare_projection_gravity_pitch_scale = DeclareLaunchArgument(
-        'projection_gravity_pitch_scale',
-        default_value='1.0',
-        description='Scale applied to IMU pitch before projection gravity alignment'
-    )
-
-    declare_projection_enable_imu_roughness_gate = DeclareLaunchArgument(
-        'projection_enable_imu_roughness_gate',
-        default_value='true',
-        description='Suppress projected LaserScan updates during IMU-detected non-planar roughness'
-    )
-
-    declare_projection_imu_topic = DeclareLaunchArgument(
-        'projection_imu_topic',
-        default_value='/imu/data',
-        description='IMU topic used by projected scan roughness gate'
-    )
-
-    declare_projection_roughness_tilt_threshold_deg = DeclareLaunchArgument(
-        'projection_roughness_tilt_threshold_deg',
-        default_value='2.0',
-        description='Roll/pitch tilt threshold for projected scan roughness gate'
-    )
-
-    declare_projection_roughness_gyro_xy_threshold_rad_s = DeclareLaunchArgument(
-        'projection_roughness_gyro_xy_threshold_rad_s',
-        default_value='0.05',
-        description='Roll/pitch angular velocity threshold for projected scan roughness gate'
-    )
-
-    declare_projection_roughness_accel_norm_deviation_threshold_m_s2 = DeclareLaunchArgument(
-        'projection_roughness_accel_norm_deviation_threshold_m_s2',
-        default_value='0.35',
-        description='Acceleration norm deviation threshold for projected scan roughness gate'
-    )
-
-    declare_projection_roughness_tilt_rate_threshold_deg_s = DeclareLaunchArgument(
-        'projection_roughness_tilt_rate_threshold_deg_s',
-        default_value='5.0',
-        description='Roll/pitch tilt-rate threshold for projected scan roughness gate'
-    )
-
-    declare_projection_roughness_accel_norm_rate_threshold_m_s3 = DeclareLaunchArgument(
-        'projection_roughness_accel_norm_rate_threshold_m_s3',
-        default_value='80.0',
-        description='Acceleration norm rate threshold for projected scan roughness gate'
-    )
-
-    declare_projection_roughness_max_scan_imu_dt_s = DeclareLaunchArgument(
-        'projection_roughness_max_scan_imu_dt_s',
-        default_value='0.2',
-        description='Maximum scan-to-IMU timestamp difference for roughness gate'
-    )
-
-    declare_projection_roughness_hold_duration_s = DeclareLaunchArgument(
-        'projection_roughness_hold_duration_s',
-        default_value='0.35',
-        description='Hold projected scan suppression after roughness clears'
-    )
-
-    declare_projection_roughness_hard_hold_duration_s = DeclareLaunchArgument(
-        'projection_roughness_hard_hold_duration_s',
-        default_value='0.0',
-        description='Longer projected scan suppression hold after hard roughness; 0 disables it'
-    )
-
-    declare_projection_roughness_score_gate = DeclareLaunchArgument(
-        'projection_roughness_score_gate',
-        default_value='1.0',
-        description='Roughness score threshold for projected scan suppression'
-    )
-
-    declare_projection_roughness_score_hard_gate = DeclareLaunchArgument(
-        'projection_roughness_score_hard_gate',
-        default_value='2.0',
-        description='Roughness score threshold logged as hard projected scan suppression'
-    )
-
-    declare_projection_roughness_gate_mode = DeclareLaunchArgument(
-        'projection_roughness_gate_mode',
-        default_value='drop',
-        description='IMU roughness gate mode: drop, throttle, observe, or adaptive'
-    )
-
-    declare_projection_roughness_throttle_min_publish_period_s = DeclareLaunchArgument(
-        'projection_roughness_throttle_min_publish_period_s',
-        default_value='0.5',
-        description='Minimum period for allowing scans during roughness when gate mode is throttle'
-    )
-
-    declare_projection_roughness_throttle_drop_hard = DeclareLaunchArgument(
-        'projection_roughness_throttle_drop_hard',
-        default_value='true',
-        description='Keep dropping hard roughness scans when roughness gate mode is throttle'
-    )
-
-    declare_projection_roughness_max_continuous_drop_duration_s = DeclareLaunchArgument(
-        'projection_roughness_max_continuous_drop_duration_s',
-        default_value='0.0',
-        description=(
-            'Maximum continuous roughness scan suppression before allowing one bridge scan; '
-            'zero preserves unbounded hard-scan suppression'
-        )
-    )
-
-    declare_projection_roughness_adaptive_require_return_revisit = DeclareLaunchArgument(
-        'projection_roughness_adaptive_require_return_revisit',
-        default_value='true',
-        description=(
-            'Only apply adaptive roughness throttling near opposite-direction odom revisits'
-        )
-    )
-
-    declare_projection_roughness_adaptive_revisit_radius_m = DeclareLaunchArgument(
-        'projection_roughness_adaptive_revisit_radius_m',
-        default_value='0.8',
-        description='Odom XY radius for adaptive roughness return-revisit detection'
-    )
-
-    declare_projection_roughness_adaptive_min_separation_s = DeclareLaunchArgument(
-        'projection_roughness_adaptive_min_separation_s',
-        default_value='20.0',
-        description='Minimum time separation for adaptive roughness return-revisit detection'
-    )
-
-    declare_projection_roughness_adaptive_min_heading_delta_rad = DeclareLaunchArgument(
-        'projection_roughness_adaptive_min_heading_delta_rad',
-        default_value='2.2',
-        description='Minimum heading delta for adaptive roughness return-revisit detection'
-    )
-
-    declare_projection_roughness_adaptive_history_duration_s = DeclareLaunchArgument(
-        'projection_roughness_adaptive_history_duration_s',
-        default_value='900.0',
-        description='Odom history duration for adaptive roughness return-revisit detection'
     )
 
     declare_projection_enable_scan_quality_gate = DeclareLaunchArgument(
@@ -719,6 +633,280 @@ def generate_launch_description():
         )
     )
 
+    declare_use_roughness_innovation_slam_toolbox = DeclareLaunchArgument(
+        'use_roughness_innovation_slam_toolbox',
+        default_value='true',
+        description=(
+            'Use custom 2D SLAM in observe mode by default. Set false for '
+            'stock Toolbox or before selecting the experimental anchor node'
+        )
+    )
+    declare_roughness_innovation_mode = DeclareLaunchArgument(
+        'roughness_innovation_mode',
+        default_value='observe',
+        description='Roughness innovation policy; online operation is observe-only'
+    )
+    declare_roughness_innovation_imu_topic = DeclareLaunchArgument(
+        'roughness_innovation_imu_topic',
+        default_value='/imu/data',
+        description='IMU topic used by the roughness innovation frontend'
+    )
+    declare_roughness_innovation_scan_qos_reliable = DeclareLaunchArgument(
+        'roughness_innovation_scan_qos_reliable',
+        default_value='false',
+        description=(
+            'Request reliable LaserScan QoS only when the publisher offers it')
+    )
+    declare_roughness_innovation_scan_qos_depth = DeclareLaunchArgument(
+        'roughness_innovation_scan_qos_depth',
+        default_value='5',
+        description='LaserScan subscription history depth'
+    )
+    declare_roughness_innovation_window_before_s = DeclareLaunchArgument(
+        'roughness_innovation_window_before_s',
+        default_value='0.10',
+        description='IMU roughness window before each accepted LaserScan'
+    )
+    declare_roughness_innovation_window_after_s = DeclareLaunchArgument(
+        'roughness_innovation_window_after_s',
+        default_value='0.10',
+        description='IMU roughness lookahead after each accepted LaserScan'
+    )
+    declare_roughness_innovation_score_gate = DeclareLaunchArgument(
+        'roughness_innovation_score_gate',
+        default_value='2.75',
+        description='Minimum normalized IMU roughness score'
+    )
+    declare_roughness_innovation_min_rough_samples = DeclareLaunchArgument(
+        'roughness_innovation_min_rough_samples',
+        default_value='3',
+        description='Minimum consecutive above-gate IMU samples'
+    )
+    declare_roughness_innovation_min_rough_duration_s = DeclareLaunchArgument(
+        'roughness_innovation_min_rough_duration_s',
+        default_value='0.02',
+        description='Minimum consecutive above-gate IMU duration'
+    )
+    declare_roughness_innovation_translation_gate_m = DeclareLaunchArgument(
+        'roughness_innovation_translation_gate_m',
+        default_value='0.04',
+        description='Minimum scan-match translation innovation in metres'
+    )
+    declare_roughness_innovation_yaw_gate_deg = DeclareLaunchArgument(
+        'roughness_innovation_yaw_gate_deg',
+        default_value='3.0',
+        description='Minimum absolute scan-match yaw innovation in degrees'
+    )
+    declare_roughness_innovation_enable_near_chain_gate = DeclareLaunchArgument(
+        'roughness_innovation_enable_near_chain_gate',
+        default_value='false',
+        description=(
+            'Raise only the Karto near-chain acceptance threshold during an '
+            'IMU roughness event and its recovery interval'
+        )
+    )
+    declare_roughness_innovation_near_chain_recovery_duration_s = (
+        DeclareLaunchArgument(
+            'roughness_innovation_near_chain_recovery_duration_s',
+            default_value='2.0',
+            description='Scan-timestamp recovery hold after a roughness event'
+        )
+    )
+    declare_roughness_innovation_near_chain_loop_closing_cooldown_s = (
+        DeclareLaunchArgument(
+            'roughness_innovation_near_chain_loop_closing_cooldown_s',
+            default_value='0.0',
+            description=(
+                'Keep loop closing suppressed after the near-chain threshold '
+                'gate releases'
+            )
+        )
+    )
+    declare_roughness_innovation_near_chain_min_rough_samples = (
+        DeclareLaunchArgument(
+            'roughness_innovation_near_chain_min_rough_samples',
+            default_value='1',
+            description='Minimum above-gate IMU samples for near-chain gating'
+        )
+    )
+    declare_roughness_innovation_near_chain_gated_min_response = (
+        DeclareLaunchArgument(
+            'roughness_innovation_near_chain_gated_min_response',
+            default_value='1.1',
+            description=(
+                'Temporary Karto LinkMatchMinimumResponseFine while the '
+                'near-chain gate is active'
+            )
+        )
+    )
+    declare_roughness_innovation_disable_loop_closing_during_gate = (
+        DeclareLaunchArgument(
+            'roughness_innovation_disable_loop_closing_during_gate',
+            default_value='false',
+            description=(
+                'Temporarily disable global Karto loop closure while the '
+                'roughness near-chain gate is active'
+            )
+        )
+    )
+    declare_roughness_innovation_enable_spatial_memory_gate = (
+        DeclareLaunchArgument(
+            'roughness_innovation_enable_spatial_memory_gate',
+            default_value='false',
+            description=(
+                'Gate scan matching when odometry revisits a remembered '
+                'IMU-rough location'
+            )
+        )
+    )
+    declare_roughness_innovation_spatial_memory_use_pose_graph_anchors = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_memory_use_pose_graph_anchors',
+            default_value='false',
+            description=(
+                'Anchor rough zones to corrected SLAM pose-graph scans so '
+                'loop-closure corrections also move remembered zones'
+            )
+        )
+    )
+    declare_roughness_innovation_spatial_memory_radius_m = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_memory_radius_m',
+            default_value='0.6',
+            description='Maximum odometry distance to a remembered rough zone'
+        )
+    )
+    declare_roughness_innovation_spatial_memory_min_revisit_separation_s = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_memory_min_revisit_separation_s',
+            default_value='20.0',
+            description='Minimum elapsed scan time before a rough-zone revisit'
+        )
+    )
+    declare_roughness_innovation_spatial_memory_min_heading_delta_deg = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_memory_min_heading_delta_deg',
+            default_value='126.0',
+            description='Minimum heading change for a rough-zone revisit'
+        )
+    )
+    declare_roughness_innovation_spatial_memory_merge_radius_m = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_memory_merge_radius_m',
+            default_value='0.10',
+            description='Same-pass rough-zone sample merge radius'
+        )
+    )
+    declare_roughness_innovation_spatial_memory_max_zones = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_memory_max_zones',
+            default_value='200',
+            description='Maximum session-local rough-zone samples'
+        )
+    )
+    declare_roughness_innovation_enable_spatial_passage_hysteresis = (
+        DeclareLaunchArgument(
+            'roughness_innovation_enable_spatial_passage_hysteresis',
+            default_value='false',
+            description=(
+                'Extend near-chain recovery while traversing a recent '
+                'remembered rough zone'
+            )
+        )
+    )
+    declare_roughness_innovation_spatial_passage_radius_m = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_passage_radius_m',
+            default_value='0.55',
+            description=(
+                'Maximum odometry distance for spatial passage hysteresis'
+            )
+        )
+    )
+    declare_roughness_innovation_spatial_passage_max_age_s = (
+        DeclareLaunchArgument(
+            'roughness_innovation_spatial_passage_max_age_s',
+            default_value='3.5',
+            description=(
+                'Maximum age of a rough zone used for passage hysteresis'
+            )
+        )
+    )
+    declare_roughness_innovation_enable_post_confirmation = DeclareLaunchArgument(
+        'roughness_innovation_enable_post_confirmation',
+        default_value='true',
+        description=(
+            'Observe the first stable scan after a rough innovation against a '
+            'frozen pre-event scan buffer'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_max_age_s = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_max_age_s',
+            default_value='2.0',
+            description='Maximum rough-to-stable confirmation interval'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_min_base_scans = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_min_base_scans',
+            default_value='8',
+            description='Minimum frozen pre-event scans required'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_max_base_scans = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_max_base_scans',
+            default_value='10',
+            description='Maximum frozen pre-event scans retained'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_min_response = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_min_response',
+            default_value='0.30',
+            description='Minimum post-event frozen-submap match response'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_min_response_gain = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_min_response_gain',
+            default_value='0.05',
+            description='Minimum post-event response improvement'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_min_covariance_improvement_ratio = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_min_covariance_improvement_ratio',
+            default_value='1.5',
+            description='Minimum rough-to-post covariance improvement ratio'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_translation_disagreement_gate_m = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_translation_disagreement_gate_m',
+            default_value='0.03',
+            description='Minimum map-to-odom translation disagreement'
+        )
+    )
+    declare_roughness_innovation_post_confirmation_yaw_disagreement_gate_deg = (
+        DeclareLaunchArgument(
+            'roughness_innovation_post_confirmation_yaw_disagreement_gate_deg',
+            default_value='1.0',
+            description='Minimum map-to-odom yaw disagreement in degrees'
+        )
+    )
+    declare_roughness_innovation_experimental_reject_scan_stamps_ns = (
+        DeclareLaunchArgument(
+            'roughness_innovation_experimental_reject_scan_stamps_ns',
+            default_value='',
+            description=(
+                'Comma-separated exact LaserScan stamps for bounded bag-only '
+                'leave-one-out experiments; never set during robot operation'
+            )
+        )
+    )
+
     declare_roughness_anchor_constraints_csv = DeclareLaunchArgument(
         'roughness_anchor_constraints_csv',
         default_value='',
@@ -809,10 +997,26 @@ def generate_launch_description():
         description='Yaw sigma used for injected roughness-anchor graph edges'
     )
 
-    slam_config = os.path.join(
-        slam_2d_bringup_dir,
-        'config',
-        'roughness_anchor_mapper_params.yaml',
+    standard_slam_condition = AndSubstitution(
+        start_slam,
+        AndSubstitution(
+            NotSubstitution(use_roughness_anchor_slam_toolbox),
+            NotSubstitution(use_roughness_innovation_slam_toolbox),
+        ),
+    )
+    roughness_anchor_condition = AndSubstitution(
+        start_slam,
+        AndSubstitution(
+            use_roughness_anchor_slam_toolbox,
+            NotSubstitution(use_roughness_innovation_slam_toolbox),
+        ),
+    )
+    roughness_innovation_condition = AndSubstitution(
+        start_slam,
+        AndSubstitution(
+            use_roughness_innovation_slam_toolbox,
+            NotSubstitution(use_roughness_anchor_slam_toolbox),
+        ),
     )
 
     slam_toolbox_node = LifecycleNode(
@@ -822,16 +1026,14 @@ def generate_launch_description():
         output='screen',
         namespace='',
         parameters=[
-            slam_config,
+            params_file,
             {
                 'use_sim_time': use_sim_time,
-                'scan_topic': slam_scan_topic,
+                'scan_topic': slam_toolbox_scan_topic,
                 'log_level': 'debug'
             }
         ],
-        condition=IfCondition(
-            AndSubstitution(start_slam, NotSubstitution(use_roughness_anchor_slam_toolbox))
-        )
+        condition=IfCondition(standard_slam_condition)
     )
 
     roughness_anchor_slam_toolbox_node = Node(
@@ -841,10 +1043,10 @@ def generate_launch_description():
         output='screen',
         namespace='',
         parameters=[
-            slam_config,
+            params_file,
             {
                 'use_sim_time': use_sim_time,
-                'scan_topic': slam_scan_topic,
+                'scan_topic': slam_toolbox_scan_topic,
                 'log_level': 'debug',
                 'enable_roughness_anchor_constraints': True,
                 'roughness_anchor_constraints_csv': roughness_anchor_constraints_csv,
@@ -863,7 +1065,96 @@ def generate_launch_description():
                 'roughness_anchor_yaw_sigma_rad': roughness_anchor_yaw_sigma_rad,
             }
         ],
-        condition=IfCondition(AndSubstitution(start_slam, use_roughness_anchor_slam_toolbox))
+        condition=IfCondition(roughness_anchor_condition)
+    )
+
+    roughness_innovation_slam_toolbox_node = Node(
+        package='slam_2d_core',
+        executable='roughness_aware_slam_toolbox_node',
+        name='slam_toolbox',
+        output='screen',
+        namespace='',
+        parameters=[
+            params_file,
+            {
+                'use_sim_time': use_sim_time,
+                'scan_topic': slam_toolbox_scan_topic,
+                'log_level': 'debug',
+                'enable_roughness_innovation_gate': True,
+                'roughness_innovation_mode': roughness_innovation_mode,
+                'roughness_imu_topic': roughness_innovation_imu_topic,
+                'roughness_scan_qos_reliable':
+                    roughness_innovation_scan_qos_reliable,
+                'roughness_scan_qos_depth':
+                    roughness_innovation_scan_qos_depth,
+                'roughness_window_before_s':
+                    roughness_innovation_window_before_s,
+                'roughness_window_after_s':
+                    roughness_innovation_window_after_s,
+                'roughness_score_gate': roughness_innovation_score_gate,
+                'roughness_min_rough_samples':
+                    roughness_innovation_min_rough_samples,
+                'roughness_min_rough_duration_s':
+                    roughness_innovation_min_rough_duration_s,
+                'roughness_translation_innovation_gate_m':
+                    roughness_innovation_translation_gate_m,
+                'roughness_yaw_innovation_gate_deg':
+                    roughness_innovation_yaw_gate_deg,
+                'roughness_enable_near_chain_gate':
+                    roughness_innovation_enable_near_chain_gate,
+                'roughness_near_chain_recovery_duration_s':
+                    roughness_innovation_near_chain_recovery_duration_s,
+                'roughness_near_chain_loop_closing_cooldown_s':
+                    roughness_innovation_near_chain_loop_closing_cooldown_s,
+                'roughness_near_chain_min_rough_samples':
+                    roughness_innovation_near_chain_min_rough_samples,
+                'roughness_near_chain_gated_min_response':
+                    roughness_innovation_near_chain_gated_min_response,
+                'roughness_disable_loop_closing_during_near_chain_gate':
+                    roughness_innovation_disable_loop_closing_during_gate,
+                'roughness_enable_spatial_memory_gate':
+                    roughness_innovation_enable_spatial_memory_gate,
+                'roughness_spatial_memory_use_pose_graph_anchors':
+                    roughness_innovation_spatial_memory_use_pose_graph_anchors,
+                'roughness_spatial_memory_radius_m':
+                    roughness_innovation_spatial_memory_radius_m,
+                'roughness_spatial_memory_min_revisit_separation_s':
+                    roughness_innovation_spatial_memory_min_revisit_separation_s,
+                'roughness_spatial_memory_min_heading_delta_deg':
+                    roughness_innovation_spatial_memory_min_heading_delta_deg,
+                'roughness_spatial_memory_merge_radius_m':
+                    roughness_innovation_spatial_memory_merge_radius_m,
+                'roughness_spatial_memory_max_zones':
+                    roughness_innovation_spatial_memory_max_zones,
+                'roughness_enable_spatial_passage_hysteresis':
+                    roughness_innovation_enable_spatial_passage_hysteresis,
+                'roughness_spatial_passage_radius_m':
+                    roughness_innovation_spatial_passage_radius_m,
+                'roughness_spatial_passage_max_age_s':
+                    roughness_innovation_spatial_passage_max_age_s,
+                'roughness_enable_post_confirmation':
+                    roughness_innovation_enable_post_confirmation,
+                'roughness_post_confirmation_max_age_s':
+                    roughness_innovation_post_confirmation_max_age_s,
+                'roughness_post_confirmation_min_base_scans':
+                    roughness_innovation_post_confirmation_min_base_scans,
+                'roughness_post_confirmation_max_base_scans':
+                    roughness_innovation_post_confirmation_max_base_scans,
+                'roughness_post_confirmation_min_response':
+                    roughness_innovation_post_confirmation_min_response,
+                'roughness_post_confirmation_min_response_gain':
+                    roughness_innovation_post_confirmation_min_response_gain,
+                'roughness_post_confirmation_min_covariance_improvement_ratio':
+                    roughness_innovation_post_confirmation_min_covariance_improvement_ratio,
+                'roughness_post_confirmation_translation_disagreement_gate_m':
+                    roughness_innovation_post_confirmation_translation_disagreement_gate_m,
+                'roughness_post_confirmation_yaw_disagreement_gate_deg':
+                    roughness_innovation_post_confirmation_yaw_disagreement_gate_deg,
+                'roughness_experimental_reject_scan_stamps_ns':
+                    roughness_innovation_experimental_reject_scan_stamps_ns,
+            }
+        ],
+        condition=IfCondition(roughness_innovation_condition)
     )
 
     configure_event = TimerAction(
@@ -877,9 +1168,7 @@ def generate_launch_description():
                 )
             )
         ],
-        condition=IfCondition(
-            AndSubstitution(start_slam, NotSubstitution(use_roughness_anchor_slam_toolbox))
-        )
+        condition=IfCondition(standard_slam_condition)
     )
 
     activate_event = TimerAction(
@@ -893,9 +1182,7 @@ def generate_launch_description():
                 )
             )
         ],
-        condition=IfCondition(
-            AndSubstitution(start_slam, NotSubstitution(use_roughness_anchor_slam_toolbox))
-        )
+        condition=IfCondition(standard_slam_condition)
     )
 
     bag_play_with_cloud_delayed = TimerAction(
@@ -1025,29 +1312,6 @@ def generate_launch_description():
             'tf_gate_child_frame': projection_tf_gate_child_frame,
             'tf_gate_child_frames': ['base_link'],
             'max_scan_tf_lag_s': projection_max_scan_tf_lag_s,
-            'enable_gravity_alignment': projection_enable_gravity_alignment,
-            'gravity_max_scan_imu_dt_s': projection_gravity_max_scan_imu_dt_s,
-            'gravity_roll_scale': projection_gravity_roll_scale,
-            'gravity_pitch_scale': projection_gravity_pitch_scale,
-            'enable_imu_roughness_gate': projection_enable_imu_roughness_gate,
-            'imu_topic': projection_imu_topic,
-            'roughness_tilt_threshold_deg': projection_roughness_tilt_threshold_deg,
-            'roughness_gyro_xy_threshold_rad_s': projection_roughness_gyro_xy_threshold_rad_s,
-            'roughness_accel_norm_deviation_threshold_m_s2':
-                projection_roughness_accel_norm_deviation_threshold_m_s2,
-            'roughness_tilt_rate_threshold_deg_s':
-                projection_roughness_tilt_rate_threshold_deg_s,
-            'roughness_accel_norm_rate_threshold_m_s3':
-                projection_roughness_accel_norm_rate_threshold_m_s3,
-            'roughness_max_scan_imu_dt_s': projection_roughness_max_scan_imu_dt_s,
-            'roughness_hold_duration_s': projection_roughness_hold_duration_s,
-            'roughness_hard_hold_duration_s': projection_roughness_hard_hold_duration_s,
-            'roughness_score_gate': projection_roughness_score_gate,
-            'roughness_score_hard_gate': projection_roughness_score_hard_gate,
-            'roughness_gate_mode': projection_roughness_gate_mode,
-            'roughness_throttle_min_publish_period_s':
-                projection_roughness_throttle_min_publish_period_s,
-            'roughness_throttle_drop_hard': projection_roughness_throttle_drop_hard,
             'enable_scan_quality_gate': projection_enable_scan_quality_gate,
             'scan_quality_min_finite_point_ratio':
                 projection_scan_quality_min_finite_point_ratio,
@@ -1066,113 +1330,15 @@ def generate_launch_description():
         condition=IfCondition(start_pointcloud_projection),
     )
 
-    laserscan_roughness_gate_node = Node(
-        package='amcl_guard',
-        executable='amcl_guard_node',
-        name='slam_laserscan_roughness_gate',
-        output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'enabled': True,
-            'input_scan_topic': scan_topic,
-            'output_scan_topic': slam_scan_topic,
-            'imu_topic': projection_imu_topic,
-            'require_good_pose': False,
-            'min_valid_beam_ratio': 0.0,
-            'max_near_beam_ratio': 1.0,
-            'max_hold_duration': 3600.0,
-            'drop_scans_after_timeout': True,
-            'publish_status_topics': True,
-            'enable_imu_roughness_gate': True,
-            'tilt_threshold_deg': projection_roughness_tilt_threshold_deg,
-            'gyro_xy_threshold_rad_s': projection_roughness_gyro_xy_threshold_rad_s,
-            'accel_norm_deviation_threshold_m_s2':
-                projection_roughness_accel_norm_deviation_threshold_m_s2,
-            'tilt_rate_threshold_deg_s': projection_roughness_tilt_rate_threshold_deg_s,
-            'accel_norm_rate_threshold_m_s3':
-                projection_roughness_accel_norm_rate_threshold_m_s3,
-            'max_scan_imu_dt_s': projection_roughness_max_scan_imu_dt_s,
-            'imu_roughness_hold_duration_s': projection_roughness_hold_duration_s,
-            'imu_roughness_hard_hold_duration_s':
-                projection_roughness_hard_hold_duration_s,
-            'roughness_score_gate': projection_roughness_score_gate,
-            'roughness_score_hard_gate': projection_roughness_score_hard_gate,
-            'roughness_gate_mode': laserscan_roughness_gate_mode,
-            'roughness_throttle_min_publish_period_s':
-                projection_roughness_throttle_min_publish_period_s,
-            'roughness_throttle_drop_hard': projection_roughness_throttle_drop_hard,
-            'roughness_max_continuous_drop_duration_s':
-                projection_roughness_max_continuous_drop_duration_s,
-            'roughness_stabilize_max_source_age_s':
-                laserscan_roughness_stabilize_max_source_age_s,
-            'roughness_stabilize_max_event_duration_s':
-                laserscan_roughness_stabilize_max_event_duration_s,
-            'roughness_stabilize_min_publish_period_s':
-                laserscan_roughness_stabilize_min_publish_period_s,
-            'roughness_stabilize_max_translation_m':
-                laserscan_roughness_stabilize_max_translation_m,
-            'roughness_stabilize_max_yaw_rad':
-                laserscan_roughness_stabilize_max_yaw_rad,
-            'roughness_stabilize_max_roll_pitch_rad':
-                laserscan_roughness_stabilize_max_roll_pitch_rad,
-            'roughness_stabilize_min_cached_valid_ratio':
-                laserscan_roughness_stabilize_min_cached_valid_ratio,
-            'roughness_stabilize_min_output_valid_ratio':
-                laserscan_roughness_stabilize_min_output_valid_ratio,
-            'roughness_stabilize_min_output_valid_beams':
-                laserscan_roughness_stabilize_min_output_valid_beams,
-            'roughness_stabilize_fallback_mode':
-                laserscan_roughness_stabilize_fallback_mode,
-            'roughness_stabilize_require_return_revisit':
-                laserscan_roughness_stabilize_require_return_revisit,
-            'roughness_adaptive_require_return_revisit':
-                projection_roughness_adaptive_require_return_revisit,
-            'roughness_adaptive_revisit_radius_m':
-                projection_roughness_adaptive_revisit_radius_m,
-            'roughness_adaptive_min_separation_s':
-                projection_roughness_adaptive_min_separation_s,
-            'roughness_adaptive_min_heading_delta_rad':
-                projection_roughness_adaptive_min_heading_delta_rad,
-            'roughness_adaptive_history_duration_s':
-                projection_roughness_adaptive_history_duration_s,
-            'roughness_adaptive_use_travel_heading':
-                laserscan_roughness_adaptive_use_travel_heading,
-            'roughness_adaptive_min_travel_distance_m':
-                laserscan_roughness_adaptive_min_travel_distance_m,
-            'roughness_adaptive_travel_heading_window_s':
-                laserscan_roughness_adaptive_travel_heading_window_s,
-            'use_nearest_imu_sample': laserscan_roughness_use_nearest_imu_sample,
-            'imu_buffer_duration_s': laserscan_roughness_imu_buffer_duration_s,
-        }],
-        condition=IfCondition(enable_laserscan_roughness_gate),
-    )
-
     return LaunchDescription([
         declare_bag_file,
+        declare_params_file,
         declare_use_sim_time,
         declare_start_slam,
         declare_scan_topic,
         declare_slam_scan_topic,
         declare_cloud_topic,
         declare_start_pointcloud_projection,
-        declare_enable_laserscan_roughness_gate,
-        declare_laserscan_roughness_gate_mode,
-        declare_laserscan_roughness_use_nearest_imu_sample,
-        declare_laserscan_roughness_imu_buffer_duration_s,
-        declare_laserscan_roughness_stabilize_max_source_age_s,
-        declare_laserscan_roughness_stabilize_max_event_duration_s,
-        declare_laserscan_roughness_stabilize_min_publish_period_s,
-        declare_laserscan_roughness_stabilize_max_translation_m,
-        declare_laserscan_roughness_stabilize_max_yaw_rad,
-        declare_laserscan_roughness_stabilize_max_roll_pitch_rad,
-        declare_laserscan_roughness_stabilize_min_cached_valid_ratio,
-        declare_laserscan_roughness_stabilize_min_output_valid_ratio,
-        declare_laserscan_roughness_stabilize_min_output_valid_beams,
-        declare_laserscan_roughness_stabilize_fallback_mode,
-        declare_laserscan_roughness_stabilize_require_return_revisit,
-        declare_laserscan_roughness_adaptive_use_travel_heading,
-        declare_laserscan_roughness_adaptive_min_travel_distance_m,
-        declare_laserscan_roughness_adaptive_travel_heading_window_s,
         declare_projection_min_z,
         declare_projection_max_z,
         declare_projection_min_publish_period_s,
@@ -1184,31 +1350,6 @@ def generate_launch_description():
         declare_projection_gate_by_tf_stamp,
         declare_projection_tf_gate_child_frame,
         declare_projection_max_scan_tf_lag_s,
-        declare_projection_enable_gravity_alignment,
-        declare_projection_gravity_max_scan_imu_dt_s,
-        declare_projection_gravity_roll_scale,
-        declare_projection_gravity_pitch_scale,
-        declare_projection_enable_imu_roughness_gate,
-        declare_projection_imu_topic,
-        declare_projection_roughness_tilt_threshold_deg,
-        declare_projection_roughness_gyro_xy_threshold_rad_s,
-        declare_projection_roughness_accel_norm_deviation_threshold_m_s2,
-        declare_projection_roughness_tilt_rate_threshold_deg_s,
-        declare_projection_roughness_accel_norm_rate_threshold_m_s3,
-        declare_projection_roughness_max_scan_imu_dt_s,
-        declare_projection_roughness_hold_duration_s,
-        declare_projection_roughness_hard_hold_duration_s,
-        declare_projection_roughness_score_gate,
-        declare_projection_roughness_score_hard_gate,
-        declare_projection_roughness_gate_mode,
-        declare_projection_roughness_throttle_min_publish_period_s,
-        declare_projection_roughness_throttle_drop_hard,
-        declare_projection_roughness_max_continuous_drop_duration_s,
-        declare_projection_roughness_adaptive_require_return_revisit,
-        declare_projection_roughness_adaptive_revisit_radius_m,
-        declare_projection_roughness_adaptive_min_separation_s,
-        declare_projection_roughness_adaptive_min_heading_delta_rad,
-        declare_projection_roughness_adaptive_history_duration_s,
         declare_projection_enable_scan_quality_gate,
         declare_projection_scan_quality_min_finite_point_ratio,
         declare_projection_scan_quality_min_height_kept_ratio,
@@ -1223,6 +1364,44 @@ def generate_launch_description():
         declare_bag_start_offset_s,
         declare_play_slam_topics_only,
         declare_use_roughness_anchor_slam_toolbox,
+        declare_use_roughness_innovation_slam_toolbox,
+        declare_roughness_innovation_mode,
+        declare_roughness_innovation_imu_topic,
+        declare_roughness_innovation_scan_qos_reliable,
+        declare_roughness_innovation_scan_qos_depth,
+        declare_roughness_innovation_window_before_s,
+        declare_roughness_innovation_window_after_s,
+        declare_roughness_innovation_score_gate,
+        declare_roughness_innovation_min_rough_samples,
+        declare_roughness_innovation_min_rough_duration_s,
+        declare_roughness_innovation_translation_gate_m,
+        declare_roughness_innovation_yaw_gate_deg,
+        declare_roughness_innovation_enable_near_chain_gate,
+        declare_roughness_innovation_near_chain_recovery_duration_s,
+        declare_roughness_innovation_near_chain_loop_closing_cooldown_s,
+        declare_roughness_innovation_near_chain_min_rough_samples,
+        declare_roughness_innovation_near_chain_gated_min_response,
+        declare_roughness_innovation_disable_loop_closing_during_gate,
+        declare_roughness_innovation_enable_spatial_memory_gate,
+        declare_roughness_innovation_spatial_memory_use_pose_graph_anchors,
+        declare_roughness_innovation_spatial_memory_radius_m,
+        declare_roughness_innovation_spatial_memory_min_revisit_separation_s,
+        declare_roughness_innovation_spatial_memory_min_heading_delta_deg,
+        declare_roughness_innovation_spatial_memory_merge_radius_m,
+        declare_roughness_innovation_spatial_memory_max_zones,
+        declare_roughness_innovation_enable_spatial_passage_hysteresis,
+        declare_roughness_innovation_spatial_passage_radius_m,
+        declare_roughness_innovation_spatial_passage_max_age_s,
+        declare_roughness_innovation_enable_post_confirmation,
+        declare_roughness_innovation_post_confirmation_max_age_s,
+        declare_roughness_innovation_post_confirmation_min_base_scans,
+        declare_roughness_innovation_post_confirmation_max_base_scans,
+        declare_roughness_innovation_post_confirmation_min_response,
+        declare_roughness_innovation_post_confirmation_min_response_gain,
+        declare_roughness_innovation_post_confirmation_min_covariance_improvement_ratio,
+        declare_roughness_innovation_post_confirmation_translation_disagreement_gate_m,
+        declare_roughness_innovation_post_confirmation_yaw_disagreement_gate_deg,
+        declare_roughness_innovation_experimental_reject_scan_stamps_ns,
         declare_roughness_anchor_constraints_csv,
         declare_roughness_anchor_event_a,
         declare_roughness_anchor_event_b,
@@ -1237,10 +1416,13 @@ def generate_launch_description():
         declare_roughness_anchor_require_complete_pair,
         declare_roughness_anchor_translation_sigma_m,
         declare_roughness_anchor_yaw_sigma_rad,
+        OpaqueFunction(function=validate_custom_slam_toolbox_selection),
+        OpaqueFunction(function=validate_roughness_innovation_playback_topics),
+        OpaqueFunction(function=validate_roughness_innovation_dependencies),
         slam_toolbox_node,
         roughness_anchor_slam_toolbox_node,
+        roughness_innovation_slam_toolbox_node,
         pointcloud_projection_node,
-        laserscan_roughness_gate_node,
         static_map_odom_tf,
         configure_event,
         activate_event,
@@ -1250,15 +1432,8 @@ def generate_launch_description():
         bag_play,
         LogInfo(msg=['Bag file will be played after SLAM node is active: ', bag_file]),
         LogInfo(msg=['SLAM scan topic: ', scan_topic]),
-        LogInfo(msg=['SLAM toolbox input scan topic: ', slam_scan_topic]),
+        LogInfo(msg=['SLAM toolbox input scan topic: ', slam_toolbox_scan_topic]),
         LogInfo(msg=['PointCloud2 projection enabled: ', start_pointcloud_projection]),
-        LogInfo(msg=['LaserScan roughness gate enabled: ', enable_laserscan_roughness_gate]),
-        LogInfo(
-            msg=[
-                'LaserScan roughness nearest IMU: ',
-                laserscan_roughness_use_nearest_imu_sample
-            ]
-        ),
         LogInfo(msg=['SLAM-only bag playback: ', play_slam_topics_only]),
         LogInfo(msg='SLAM mapping started. Use map_saver to save the map when done.'),
         LogInfo(msg=['Static map->odom TF: ', use_static_map_odom]),

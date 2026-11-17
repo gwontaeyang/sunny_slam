@@ -31,10 +31,14 @@
 #include "slam_3d_core/imu_relative_attitude_constraint.hpp"
 #include "slam_3d_core/imu_shock_policy.hpp"
 #include "slam_3d_core/indoor_terrain_evidence.hpp"
+#include "slam_3d_core/pose_graph_optimizer.hpp"
+#include "slam_3d_core/registration_information.hpp"
 #include "slam_3d_core/registration_policy.hpp"
 #include "slam_3d_core/spatial_mapping_policy.hpp"
 #include "std_msgs/msg/int64.hpp"
 #include "slam_3d_core/submap_policy.hpp"
+#include "slam_3d_core/keyframe_archive.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "slam_3d_core/terrain_preview_evidence.hpp"
 #include "slam_3d_core/voxel_surfel_registration.hpp"
 #include "tf2_ros/buffer.h"
@@ -64,6 +68,8 @@ private:
   using TerrainSupportVector = std::vector<TerrainSupportPoint>;
   using TerrainSupportVectorPtr = std::shared_ptr<TerrainSupportVector>;
   using TerrainSupportVectorConstPtr = std::shared_ptr<const TerrainSupportVector>;
+  using Matrix6d = Eigen::Matrix<double, 6, 6>;
+  using Vector6d = Eigen::Matrix<double, 6, 1>;
 
   struct TerrainSensorScan
   {
@@ -75,12 +81,15 @@ private:
 
   struct Keyframe
   {
+    std::uint64_t archive_id{0};
     rclcpp::Time stamp;
     Eigen::Isometry3d map_T_base{Eigen::Isometry3d::Identity()};
     // Registration evidence may include support-surface points. Mapping
     // evidence is kept separate so published/saved maps can remain obstacle-only.
     CloudPtr cloud_base;
     CloudPtr mapping_cloud_base;
+    // Preserve mapping views before terrain classification prunes its own copy.
+    std::vector<TerrainSensorScan> archive_sensor_scans;
     std::vector<TerrainSensorScan> terrain_sensor_scans;
     CloudPtr cloud_map;
     CloudPtr mapping_cloud_map;
@@ -126,6 +135,11 @@ private:
     double translation_weight{1.0};
     double vertical_translation_weight{1.0};
     double rotation_weight{1.0};
+    Matrix6d information_matrix{Matrix6d::Identity()};
+    bool registration_information_used{false};
+    int registration_observable_rank{0};
+    double registration_hessian_condition{0.0};
+    double registration_information_min_gain{1.0};
     bool loop_closure{false};
   };
 
@@ -140,6 +154,13 @@ private:
     int edges{0};
     int loop_edges{0};
     int robust_loop_edges_downweighted{0};
+    int solver_stages{0};
+    int solver_successful_steps{0};
+    int solver_unsuccessful_steps{0};
+    int dcs_downweighted_loop_edges{0};
+    int registration_information_edges{0};
+    int configured_diagonal_information_edges{0};
+    int minimum_registration_observable_rank{0};
     int ground_sequence_applied_edges{0};
     double residual_before{0.0};
     double residual_after{0.0};
@@ -149,6 +170,13 @@ private:
     double robust_objective_before_ground_sequence{0.0};
     double min_loop_robust_weight{1.0};
     double new_loop_robust_weight{1.0};
+    double dcs_min_scale{1.0};
+    double new_loop_dcs_scale{1.0};
+    double solver_first_stage_initial_cost{0.0};
+    double solver_last_stage_final_cost{0.0};
+    double solver_final_gradient_max_norm{0.0};
+    double maximum_registration_hessian_condition{0.0};
+    double minimum_registration_information_gain{1.0};
     double max_update_translation_m{0.0};
     double max_update_rotation_deg{0.0};
     double same_layer_z_seed_correction_m{0.0};
@@ -254,6 +282,8 @@ private:
     bool registration_refinement_applied{false};
     bool registration_gap_relaxation_applied{false};
     bool surfel_converged{false};
+    bool registration_information_valid{false};
+    bool pose_graph_new_loop_registration_information_used{false};
     bool cloud_sync_wait_timed_out{false};
     bool cloud_sync_watermark_resolved{false};
     bool primary_cloud_gap_before{false};
@@ -287,6 +317,10 @@ private:
     int pose_graph_edges{0};
     int pose_graph_loop_edges{0};
     int pose_graph_robust_loop_edges_downweighted{0};
+    int pose_graph_solver_stages{0};
+    int pose_graph_solver_successful_steps{0};
+    int pose_graph_solver_unsuccessful_steps{0};
+    int pose_graph_dcs_downweighted_loop_edges{0};
     int pose_graph_duplicate_submap_pair_previous_edges{0};
     int pose_graph_same_layer_reference_keyframe_index{-1};
     int pose_graph_ground_sequence_applied_edges{0};
@@ -296,6 +330,10 @@ private:
     int surfel_planar_surfels{0};
     int surfel_correspondences{0};
     int surfel_observable_rank{0};
+    int registration_information_observable_rank{0};
+    int pose_graph_registration_information_edges{0};
+    int pose_graph_configured_diagonal_information_edges{0};
+    int pose_graph_minimum_registration_observable_rank{0};
     double deskew_time_ratio{0.0};
     double deskew_scan_duration_s{0.0};
     double inter_lidar_motion_max_stamp_delta_s{0.0};
@@ -352,6 +390,11 @@ private:
     double pose_graph_robust_objective_before_ground_sequence{0.0};
     double pose_graph_min_loop_robust_weight{1.0};
     double pose_graph_new_loop_robust_weight{1.0};
+    double pose_graph_dcs_min_scale{1.0};
+    double pose_graph_new_loop_dcs_scale{1.0};
+    double pose_graph_solver_first_stage_initial_cost{0.0};
+    double pose_graph_solver_last_stage_final_cost{0.0};
+    double pose_graph_solver_final_gradient_max_norm{0.0};
     double pose_graph_max_update_translation_m{0.0};
     double pose_graph_max_update_rotation_deg{0.0};
     double pose_graph_same_layer_reference_xy_distance_m{-1.0};
@@ -411,9 +454,17 @@ private:
     double surfel_target_build_time_ms{0.0};
     double surfel_optimization_time_ms{0.0};
     double surfel_total_time_ms{0.0};
+    double registration_information_hessian_condition{0.0};
+    double registration_information_evaluation_runtime_ms{0.0};
+    double pose_graph_maximum_registration_hessian_condition{0.0};
+    double pose_graph_minimum_registration_information_gain{1.0};
+    double pose_graph_new_loop_information_min_gain{1.0};
     std::array<double, 6> surfel_hessian_eigenvalues{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     Eigen::Vector3d surfel_weak_rotation_axes{Eigen::Vector3d::Zero()};
     Eigen::Vector3d surfel_weak_translation_axes{Eigen::Vector3d::Zero()};
+    Matrix6d registration_information_hessian_map_rt{Matrix6d::Zero()};
+    Eigen::Isometry3d registration_information_pose_map_T_base{
+      Eigen::Isometry3d::Identity()};
     Eigen::Isometry3d map_T_base{Eigen::Isometry3d::Identity()};
     std::string rejection_reason;
     std::string shock_quarantine_reason;
@@ -434,6 +485,7 @@ private:
     std::string pose_graph_rejection_reason;
     std::string pose_graph_minimum_interval_status{"not_evaluated"};
     std::string pose_graph_duplicate_submap_pair_status{"not_evaluated"};
+    std::string pose_graph_new_loop_information_status{"not_evaluated"};
     std::string pose_graph_solver_status{"not_run"};
     std::string pose_graph_convergence_reason{"not_run"};
     std::string pose_graph_same_layer_reference_source{"not_evaluated"};
@@ -441,6 +493,7 @@ private:
     std::string ground_motion_constraint_status{"not_evaluated"};
     std::string imu_relative_attitude_constraint_status{"disabled"};
     std::string surfel_reason{"not_selected"};
+    std::string registration_information_status{"disabled"};
   };
 
   struct DeskewStats
@@ -779,7 +832,12 @@ private:
     const std::vector<TerrainSensorScan> & terrain_sensor_scans,
     const rclcpp::Time & stamp,
     const std::optional<GravitySample> & gravity_sample,
-    bool gravity_sample_stale);
+    bool gravity_sample_stale,
+    const RegistrationResult * registration_result = nullptr);
+  void attachRegistrationInformation(
+    const CloudConstPtr & source,
+    const CloudConstPtr & target,
+    RegistrationResult & result) const;
   bool shouldAddKeyframe(const Eigen::Isometry3d & pose) const;
   std::string shockQuarantineReason(const RegistrationResult & result) const;
   std::vector<float> computeScanDescriptor(const CloudConstPtr & scan_base) const;
@@ -812,6 +870,7 @@ private:
   double poseGraphEdgeSquaredError(
     const PoseGraphEdge & edge,
     const std::vector<Eigen::Isometry3d> & poses) const;
+  static PoseGraphConstraint poseGraphConstraintFromEdge(const PoseGraphEdge & edge);
   double poseGraphLoopRobustWeight(const PoseGraphEdge & edge, double squared_error) const;
   double poseGraphResidual(
     const std::vector<Eigen::Isometry3d> & poses,
@@ -822,7 +881,8 @@ private:
     const std::vector<Eigen::Isometry3d> & previous_keyframe_poses,
     bool same_layer_z_constraint,
     double loop_vertical_translation_weight,
-    bool distributed_loop_seed);
+    bool distributed_loop_seed,
+    const RegistrationInformationResult * registration_information);
   void updatePathFromKeyframeCorrections(
     const std::vector<Eigen::Isometry3d> & previous_keyframe_poses);
   void applyPoseGraphCorrection(
@@ -833,6 +893,8 @@ private:
     const std::string & imu_attitude_sample_status,
     RegistrationResult & result);
   void rebuildGlobalMap();
+  void exportKeyframes(
+    const std::shared_ptr<std_srvs::srv::Trigger::Response> & response);
   void classifyKeyframeTerrain(
     Keyframe & keyframe,
     const std::optional<GravitySample> & gravity_sample,
@@ -902,6 +964,10 @@ private:
   std::string path_topic_;
   std::string local_map_topic_;
   std::string global_map_topic_;
+  std::string keyframe_archive_directory_;
+  double keyframe_archive_voxel_leaf_m_{0.22};
+  std::uint64_t next_keyframe_archive_id_{0};
+  std::uint64_t pruned_keyframe_count_{0};
   std::string terrain_evidence_topic_;
   std::string terrain_evidence_colored_topic_;
   std::string terrain_support_topic_;
@@ -1151,6 +1217,8 @@ private:
 
   std::string deskew_point_time_field_{"auto"};
   std::string imu_rotation_prediction_source_{"angular_velocity"};
+  std::string pose_graph_solver_{"legacy_relaxation"};
+  std::string pose_graph_information_mode_{"configured_diagonal"};
   PoseGraphMinimumIntervalOverrideConfig pose_graph_minimum_interval_override_config_;
   PoseGraphDuplicateSubmapPairOverrideConfig
     pose_graph_duplicate_submap_pair_override_config_;
@@ -1170,6 +1238,8 @@ private:
   std::uint64_t terrain_gravity_stale_keyframe_count_{0};
   SpatialMappingPolicyConfig spatial_mapping_config_;
   SubmapPolicyConfig submap_policy_config_;
+  PoseGraphOptimizationConfig pose_graph_optimizer_config_;
+  RegistrationInformationConfig pose_graph_information_config_;
   VoxelSurfelRegistration::Config surfel_config_;
   MappingCloudRefinementConfig mapping_cloud_refinement_config_;
   MappingCloudVerifiedCoarseConfig mapping_cloud_verified_coarse_config_;
@@ -1313,6 +1383,7 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr local_map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr global_map_pub_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr export_keyframes_service_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr terrain_evidence_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr terrain_evidence_colored_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr terrain_support_pub_;

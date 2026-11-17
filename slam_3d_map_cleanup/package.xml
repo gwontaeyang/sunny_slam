@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>slam_3d_map_cleanup</name>
+  <version>0.1.0</version>
+  <description>Offline temporal evidence cleanup of archived 3D mapping keyframes.</description>
+  <maintainer email="gwontaeyang@users.noreply.github.com">gwontaeyang</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>eigen</depend>
+  <depend>libpcl-all-dev</depend>
+  <depend>yaml-cpp</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>python3-yaml</test_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

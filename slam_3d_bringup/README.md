@@ -46,7 +46,8 @@ approximate geometry experiment, not evidence of tightly synchronized LIO.
   timestamp-interpolated wheel odom to move auxiliary clouds to the XT32 time;
 - rejects a sensor cloud when TF is missing in the production profile;
 - runs editable ICP, GICP, or voxel-surfel scan-to-map registration plus
-  keyframes, shock quarantine, place recognition, and a small pose graph;
+  keyframes, shock quarantine, place recognition, and either the legacy
+  edge-wise pose graph or the indoor staged Ceres SE(3) backend;
 - uses one cloud-bounded causal IMU snapshot for deskew, roughness, and optional
   gyro prediction. Watermark waiting covers all enabled IMU consumers and the
   latest selected auxiliary point-time end. The validated indoor bag profiles
@@ -92,7 +93,32 @@ used live.
 
 For indoor development, select one of the explicit sensor profiles. Both use
 `/imu/data`, disable wheel prediction, enable SE(3) keyframes and overlapping
-submaps, and leave dynamic-object processing outside the pipeline. The current
+submaps, and publish temporally unfiltered geometry on `/slam_3d/map/global_cloud`.
+Temporal-static cleanup is a separate offline `slam_3d_map_cleanup` step using
+[`config/indoor.yaml`](../slam_3d_map_cleanup/config/indoor.yaml), not a core or
+bringup process. `temporal_static_map_enabled=true` is rejected with migration
+guidance; `false` is a legacy guard only. Remove the other old temporal parameters.
+
+To retain cleanup inputs, set `keyframe_archive_directory` to a new absolute
+archive path in the selected core parameter file before mapping. Its default
+`''` disables archive scan retention/export; `keyframe_archive_voxel_leaf_m`
+defaults to `0.22`. After graph correction, call the private Trigger service
+while the core is still running:
+
+```bash
+ros2 service call /scan_to_map_icp_node/export_keyframes std_srvs/srv/Trigger '{}'
+```
+
+The launch default node is `/scan_to_map_icp_node`; adjust the service path when
+renaming or namespacing it. Check the response before running `temporal_map_cleanup`
+offline. The archive contains immutable mapping-only sensor views and one snapshot
+of corrected poses. Its manifest records `snapshot_scope: retained_keyframes`,
+`pruned_keyframes`, and stable monotonic keyframe IDs; it is not a full-session
+archive after pruning. See the [core migration workflow](../slam_3d_core/README.md#offline-map-cleanup-migration).
+Feed the resulting `map_static.pcd`, not a core `global_cloud` capture, into the
+cleaned-map projection workflow with a trajectory from the same corrected state.
+
+Semantic person detection and object tracking remain outside the pipeline. The current
 profiles require `cv7_link` and use its native XYZ convention with identity
 IMU-to-base rotation. The older `04_gangnam` roll-180 workaround remains in
 archived replay configs only. Physical mounting, time offset, Xsens, and other
@@ -128,6 +154,15 @@ LiDAR-only constant-velocity initial guess. For a slower quality-reference A/B
 run, override `learning_slam_params_file` with
 `slam_3d_core/config/indoor_xt32_single_gicp_quality_params.yaml`; neither file
 subscribes to wheel odometry.
+
+Both indoor profiles run the Ceres SE(3) graph with the full-bag validated
+`pose_graph_information_mode=configured_diagonal` default. The opt-in
+`registration_observability` mode lets accepted keyframe and loop registrations
+contribute a bounded full `6x6` information shape from the fixed-pose
+point-to-plane Hessian. The configured diagonal weights remain its upper bound
+and fallback for invalid geometry or a changed loop linearization point. This
+mode is an observability heuristic, not a calibrated ICP covariance estimate,
+and must pass a representative replay regression before profile activation.
 
 Both indoor profiles enable an IMU shock state machine and persistent 3D
 terrain evidence. A detected impact suppresses the constant-velocity seed and

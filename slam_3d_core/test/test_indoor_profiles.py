@@ -288,9 +288,26 @@ def test_profiles_require_confirmed_submap_loops_and_robust_graph(profile_name):
     assert params["place_recognition_submap_consistency_max_rotation_deg"] > 0.0
     assert params["place_recognition_require_pose_graph_correction"] is True
     assert params["pose_graph_correction_enabled"] is True
+    assert params["pose_graph_solver"] == "ceres_se3"
+    assert params["pose_graph_information_mode"] == "configured_diagonal"
+    relative_threshold = params["pose_graph_information_relative_eigen_threshold"]
+    strong_ratio = params["pose_graph_information_strong_eigenvalue_ratio"]
+    weak_ratio = params["pose_graph_information_weak_ratio"]
+    assert 0.0 < relative_threshold <= strong_ratio <= 1.0
+    assert 0.0 < weak_ratio < 1.0
     assert params["pose_graph_planar_correction_enabled"] is False
     assert params["pose_graph_robust_loop_enabled"] is True
     assert params["pose_graph_loop_cauchy_scale"] > 0.0
+    robust_stages = params["pose_graph_ceres_robust_scale_factors"]
+    assert robust_stages == sorted(robust_stages, reverse=True)
+    assert robust_stages[-1] == pytest.approx(1.0)
+    assert params["pose_graph_ceres_max_iterations_per_stage"] >= 10
+    assert params["pose_graph_ceres_dcs_enabled"] is True
+    assert params["pose_graph_ceres_dcs_start_stage"] == 0
+    assert params["pose_graph_ceres_dcs_phi"] > 0.0
+    assert 0.0 < params["pose_graph_ceres_dcs_min_scale"] < 1.0
+    assert params["pose_graph_ceres_num_threads"] >= 1
+    assert params["pose_graph_ceres_use_nonmonotonic_steps"] is False
     assert 0.0 < params["pose_graph_min_new_loop_robust_weight"] <= 1.0
     assert params["pose_graph_max_iteration_translation_step_m"] > 0.0
     assert params["pose_graph_max_iteration_rotation_step_deg"] > 0.0
@@ -309,6 +326,32 @@ def test_profiles_do_not_enable_dynamic_object_processing(profile_name):
         for key in _flatten_keys(params)
         for fragment in forbidden_fragments
     )
+
+
+@pytest.mark.parametrize("profile_name", PROFILES)
+def test_profiles_leave_cleanup_offline_and_archive_opt_in(profile_name):
+    params = _load_profile(profile_name)
+
+    assert params["temporal_static_map_enabled"] is False
+    assert {
+        key for key in params if key.startswith("temporal_static_map_")
+    } == {"temporal_static_map_enabled"}
+    assert params["keyframe_archive_directory"] == ""
+    assert params["keyframe_archive_voxel_leaf_m"] == pytest.approx(0.22)
+    assert params["global_map_topic"] == "/slam_3d/map/global_cloud"
+
+
+def test_compute_budget_override_does_not_reenable_online_cleanup():
+    path = CONFIG_DIR / "indoor_compute_budget_overrides.yaml"
+    with path.open("r", encoding="utf-8") as stream:
+        overrides = yaml.safe_load(stream)["scan_to_map_icp_node"]["ros__parameters"]
+
+    assert not any(key.startswith("temporal_static_map_") for key in overrides)
+    for profile_name in PROFILES:
+        params = {**_load_profile(profile_name), **overrides}
+        assert params["temporal_static_map_enabled"] is False
+        assert params["keyframe_archive_directory"] == ""
+        assert params["keyframe_archive_voxel_leaf_m"] == pytest.approx(0.22)
 
 
 @pytest.mark.parametrize("profile_name", PROFILES)

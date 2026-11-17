@@ -139,6 +139,11 @@ scan_to_map_icp_node:
     z_max_m: 6.0
     scan_voxel_leaf_m: 0.18
     map_voxel_leaf_m: 0.22
+    # Legacy guard only: true is rejected. Cleanup belongs to slam_3d_map_cleanup.
+    temporal_static_map_enabled: false
+    # Empty disables archive scan retention and export; global_cloud is uncleaned.
+    keyframe_archive_directory: ''
+    keyframe_archive_voxel_leaf_m: 0.22
     min_scan_points: 300
     surfel_voxel_size_m: 0.6
     surfel_min_points_per_voxel: 5
@@ -318,23 +323,40 @@ scan_to_map_icp_node:
     # The backend remains 3D. New loop edges must survive robust weighting and
     # must reduce the graph objective before their correction is committed.
     pose_graph_correction_enabled: true
+    pose_graph_solver: ceres_se3
     pose_graph_planar_correction_enabled: false
     pose_graph_robust_loop_enabled: true
     pose_graph_correction_min_keyframes: 12
     pose_graph_correction_max_translation_m: 4.0
     pose_graph_correction_max_rotation_deg: 35.0
     pose_graph_correction_min_interval_s: 2.0
-    # 04_gangnam bag02 return-loop A/B: 80 iterations reduced the terminal
-    # centroid gap from 0.799 m (40 iterations) to 0.658 m while lowering the
-    # correction p95 from 0.404 m to 0.259 m. This is a bounded iteration cap,
-    # not a ground-truth accuracy claim.
+    # Retained only as the bounded legacy_relaxation fallback iteration cap.
     pose_graph_optimization_iterations: 80
     pose_graph_optimization_step: 0.12
     pose_graph_odom_translation_weight: 1.0
     pose_graph_odom_rotation_weight: 1.0
     pose_graph_loop_translation_weight: 2.0
     pose_graph_loop_rotation_weight: 1.5
+    # Keep the full-bag validated diagonal graph weights as the indoor default.
+    # registration_observability remains available for explicit degeneracy A/B.
+    pose_graph_information_mode: configured_diagonal
+    pose_graph_information_relative_eigen_threshold: 0.001
+    pose_graph_information_strong_eigenvalue_ratio: 0.05
+    pose_graph_information_weak_ratio: 0.02
     pose_graph_loop_cauchy_scale: 1.0
+    # Stage 0 starts with a broad Cauchy basin. Later stages reduce the scale;
+    # DCS independently lowers inconsistent loop information at every stage.
+    pose_graph_ceres_max_iterations_per_stage: 20
+    pose_graph_ceres_robust_scale_factors: [4.0, 2.0, 1.0]
+    pose_graph_ceres_dcs_enabled: true
+    pose_graph_ceres_dcs_start_stage: 0
+    pose_graph_ceres_dcs_phi: 5.0
+    pose_graph_ceres_dcs_min_scale: 0.05
+    pose_graph_ceres_function_tolerance: 1.0e-6
+    pose_graph_ceres_gradient_tolerance: 1.0e-10
+    pose_graph_ceres_parameter_tolerance: 1.0e-8
+    pose_graph_ceres_num_threads: 2
+    pose_graph_ceres_use_nonmonotonic_steps: false
     pose_graph_min_new_loop_robust_weight: 0.08
     pose_graph_max_iteration_translation_step_m: 0.15
     pose_graph_max_iteration_rotation_step_deg: 3.0

@@ -109,7 +109,9 @@ point-to-plane scan-to-local-map implementation with:
 - pose and keyframe quarantine during shocks;
 - scan-context-family place candidates;
 - geometric loop verification;
-- a small robust pose-graph relaxation.
+- a selectable pose-graph backend: legacy edge-wise relaxation for the held
+  outdoor profile, or staged sparse Ceres SE(3) least squares with Cauchy and
+  DCS for profiles that have completed replay validation.
 
 The Geoje bounded replay currently selects voxel-surfel. GICP remains the
 production-profile default until a synchronized live commissioning dataset

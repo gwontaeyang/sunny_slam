@@ -22,7 +22,9 @@ path, not an assumption in the SLAM frontend.
 | CT-ICP | Continuous-time scan representation for motion distortion | Design reference; current implementation remains gyro-only rotational deskew |
 | DLIO | Direct LiDAR-inertial odometry with continuous-time deskew | Bias/velocity-aware translational deskew remains pending |
 | KISS-ICP | Simple inspectable scan-to-map baseline | GICP baseline implemented |
-| X-ICP | Degeneracy and observable-direction reasoning | Independent surfel solver reports Hessian rank |
+| X-ICP | Degeneracy and observable-direction reasoning | Surfel Hessian rank and bounded directional pose-graph information implemented |
+| LP-ICP | Correspondence-level localizability and soft/hard directional constraints | Follow-up frontend experiment; not implemented |
+| Informed, Constrained, Aligned | Field comparison of TSVD, inequality, and Tikhonov degeneracy mitigation | Evidence for a later soft-constrained frontend A/B; not implemented |
 | Wildcat | Continuous-time handling for rough motion | Reference for later translation/bias deskew |
 
 ## Backend
@@ -30,9 +32,11 @@ path, not an assumption in the SLAM frontend.
 | Reference | Adopted Idea | Current Status |
 |---|---|---|
 | Scan Context | Ring/sector place descriptor | Small editable variant implemented |
-| LIO-SAM / GTSAM | Incremental graph with loop factors | Small internal relaxation only |
-| Dynamic Covariance Scaling | Robust loop constraints | Cauchy weighting implemented in baseline |
-| GLIM | Submap-centric large-scale architecture | Planned persistent submap layer |
+| LIO-SAM / GTSAM | Factor graph with loop constraints | Batch Ceres SE(3) graph implemented; IMU states and incremental smoothing pending |
+| Dynamic Covariance Scaling | Robust loop constraints | Per-loop DCS outer reweighting plus staged Cauchy solve implemented |
+| Ceres 3D pose-graph example | Full `6x6` information whitening and fixed gauge pose | Residual whitening and gauge fixing implemented |
+| Censi / Bonnabel ICP covariance analyses | Registration uncertainty and fixed-correspondence caveats | Hessian contributes bounded observability shape only; no calibrated covariance claim |
+| GLIM | Submap-centric large-scale architecture | Overlapping active/completed submaps implemented; incremental smoother pending |
 
 ## Indoor Terrain And Rough Motion
 
@@ -63,8 +67,13 @@ path, not an assumption in the SLAM frontend.
 - KISS-ICP: https://github.com/PRBonn/kiss-icp
 - GLIM: https://github.com/koide3/glim
 - X-ICP: https://arxiv.org/abs/2211.16335
+- LP-ICP: https://arxiv.org/abs/2501.02580
+- Informed, Constrained, Aligned: https://arxiv.org/abs/2408.11809
 - Wildcat: https://arxiv.org/abs/2205.12595
 - Dynamic Covariance Scaling: https://doi.org/10.1109/ICRA.2013.6630557
+- Ceres 3D pose-graph example: https://github.com/ceres-solver/ceres-solver/tree/master/examples/slam/pose_graph_3d
+- An Accurate Closed-form Estimate of ICP's Covariance (Censi): https://censi.science/pub/research/2007-icra-icpcov.pdf
+- On the Covariance of ICP-based Scan-matching Techniques (Bonnabel et al.): https://arxiv.org/abs/1410.7632
 - Vibration-Aware LIO: https://arxiv.org/abs/2507.04311
 - Robot-Centric Elevation Mapping: https://www.research-collection.ethz.ch/items/c14beb8a-7dc9-4413-90f4-ffe814108ab9
 - GPU Elevation Mapping: https://arxiv.org/abs/2204.12876

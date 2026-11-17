@@ -1,5 +1,23 @@
 # slam_3d_lidar_ingest
 
+## Compute budget
+
+Load `config/compute_budget_overrides.yaml` after the calibrated ingest profile
+to cap each normalized cloud at `4,000` original points. `max_output_points=0`
+retains the full cloud (default); values below two other than zero are rejected.
+The cap applies independently to each enabled sensor.
+
+Raw contract validation still checks all input points. Selection uses ordered,
+jittered strata rather than a fixed stride, which would alias repeated ring
+layouts. It preserves original XYZ, ring, intensity, and acquisition time; the
+first and last finite records are selected when nonfinite-point removal is on;
+otherwise the first and last raw records are selected. The original header and
+point offsets are retained. Interior nonfinite selected points may be dropped,
+so actual output count can be below the cap. Empty finite clouds are rejected.
+`max_output_points` and `output_point_count` are exposed in ingest diagnostics.
+Fewer output points reduce serialization, deskew, filtering, and registration
+work downstream. Pair this with the core's `indoor_compute_budget_overrides.yaml`.
+
 This package owns the hardware-facing LiDAR validation and normalization
 boundary for the editable 3D SLAM pipeline. The current deployment profile is
 two Hesai JT128 sensors plus one Hesai XT32. It does not geometrically merge

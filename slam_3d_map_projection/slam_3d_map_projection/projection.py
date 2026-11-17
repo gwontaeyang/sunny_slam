@@ -94,6 +94,7 @@ class ProjectionResult:
     excessive_roughness_mask: np.ndarray
     terrain_hazard_mask: np.ndarray
     terrain_hazard_cleared_by_trajectory_mask: np.ndarray
+    enclosed_unknown_filled_mask: np.ndarray
     trajectory_mask: np.ndarray
     trajectory_centerline_mask: np.ndarray
     trajectory_yaw_rad: np.ndarray
@@ -896,6 +897,17 @@ def project_map(
         config,
     )
     free = free_candidate & ~occupied
+    enclosed_unknown_filled = np.zeros_like(free)
+    if config.fill_enclosed_unknown_as_free:
+        known_floor_or_wall = free | occupied
+        enclosed_unknown = (
+            ndimage.binary_fill_holes(known_floor_or_wall)
+            & ~known_floor_or_wall
+        )
+        enclosed_unknown_filled = (
+            enclosed_unknown & ~untraversed_terrain_hazard
+        )
+        free |= enclosed_unknown_filled
 
     ramp_support = ndimage.binary_erosion(
         floor_support,
@@ -940,6 +952,7 @@ def project_map(
         "terrain_hazard_cleared_by_trajectory_mask": (
             terrain_hazard_cleared_by_trajectory
         ),
+        "enclosed_unknown_filled_mask": enclosed_unknown_filled,
         "trajectory_mask": trajectory_free,
         "trajectory_centerline_mask": trajectory_centerline,
     }
@@ -1078,6 +1091,19 @@ def project_map(
             "requires_planner_allow_unknown_false": True,
             "thresholds_are_robot_measurement_verified": False,
         },
+        "interior_free_completion": {
+            "enabled": config.fill_enclosed_unknown_as_free,
+            "policy": "fill_holes_in_known_floor_or_wall_envelope",
+            "filled_cells": int(
+                np.count_nonzero(arrays["enclosed_unknown_filled_mask"])
+            ),
+            "filled_area_m2": float(
+                np.count_nonzero(arrays["enclosed_unknown_filled_mask"])
+                * cell_area
+            ),
+            "exterior_unknown_preserved": True,
+            "untraversed_terrain_hazards_preserved_unknown": True,
+        },
         "trajectory": {
             "yaw_source": yaw_source,
             "timestamp_source_available": trajectory_stamp_ns is not None,
@@ -1158,6 +1184,9 @@ def project_map(
         terrain_hazard_mask=arrays["terrain_hazard_mask"],
         terrain_hazard_cleared_by_trajectory_mask=arrays[
             "terrain_hazard_cleared_by_trajectory_mask"
+        ],
+        enclosed_unknown_filled_mask=arrays[
+            "enclosed_unknown_filled_mask"
         ],
         trajectory_mask=trajectory_mask,
         trajectory_centerline_mask=trajectory_centerline,

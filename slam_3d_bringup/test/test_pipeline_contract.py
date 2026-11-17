@@ -16,6 +16,48 @@ def _load_package_yaml(package_name, relative_path):
         return yaml.safe_load(handle)
 
 
+def test_temporal_static_confirmation_belongs_to_offline_cleanup():
+    pipeline = _load_yaml("config/indoor_pipeline.yaml")
+    cleanup = pipeline["offline_map_cleanup"]
+    assert cleanup["package"] == "slam_3d_map_cleanup"
+    assert cleanup["executable"] == "temporal_map_cleanup"
+    assert cleanup["config"] == "config/indoor.yaml"
+    assert cleanup["scope"] == "derived_offline_map_only"
+    assert cleanup["source"] == "exported_keyframe_archive"
+    assert cleanup["hit_unit"] == "synchronized_keyframe_not_sensor_count"
+    assert cleanup["per_sensor_ray_origin_preserved"] is True
+    assert cleanup["registration_and_loop_authority"] == "unchanged_mapping_cloud"
+    assert cleanup["semantic_person_detection"] == "excluded"
+    prior_free = cleanup["prior_free_space"]
+    assert prior_free["enabled"] is True
+    guard = prior_free["ground_grazing_guard"]
+    assert guard["scope"] == "first_hit_prior_free_only"
+    assert guard["max_sensor_vertical_drop_m"] == 0.9
+    assert guard["existing_candidate_ray_miss"] == "unchanged"
+
+    params = _load_package_yaml(cleanup["package"], cleanup["config"])
+    assert params["enabled"] is True
+    assert params["voxel_size_m"] > 0.0
+    assert params["min_hit_observations"] >= 3
+    assert params["min_observation_span_s"] > 0.0
+    assert params["min_viewpoint_distance_m"] > 0.0
+    assert params["ray_clearing_enabled"] is True
+    assert params["ray_endpoint_margin_m"] >= params["voxel_size_m"]
+    assert params["max_ray_length_m"] > 0.0
+    assert params["max_rays_per_observation"] > 0
+    assert params["prior_free_enabled"] is True
+    assert 1 <= params["min_prior_free_observations"] <= (
+        params["max_prior_free_observations"]
+    )
+    assert params["prior_free_max_sensor_vertical_drop_m"] == (
+        guard["max_sensor_vertical_drop_m"]
+    )
+    assert 0.0 < params["retention_min_hit_ratio"] < (
+        params["promotion_min_hit_ratio"]
+    ) <= 1.0
+    assert params["min_miss_observations_for_demotion"] >= 2
+
+
 def test_large_scale_pipeline_matches_hesai_geometry_and_time_limits():
     config = _load_yaml("config/large_scale_outdoor_pipeline.yaml")
 
@@ -126,7 +168,72 @@ def test_indoor_pipeline_reuses_core_and_excludes_wheel_from_estimator():
     assert preview["pose_graph_edge_mutation"] == "prohibited_in_observer_stage"
     assert preview["unsafe_crossing_policy"] == "conflict_not_confirmation"
     assert config["mapping"]["submaps"]["overlap_required"] is True
-    assert config["mapping"]["pose_graph"]["dimensions"] == "se3"
+    pose_graph = config["mapping"]["pose_graph"]
+    assert pose_graph["dimensions"] == "se3"
+    assert pose_graph["solver"] == "ceres_se3"
+    assert pose_graph["nonlinear_method"] == "levenberg_marquardt"
+    assert pose_graph["linear_solver"] == "sparse_normal_cholesky"
+    assert pose_graph["robust_scale_schedule"] == [4.0, 2.0, 1.0]
+    assert pose_graph["loop_outer_reweight"] == "dynamic_covariance_scaling"
+    assert pose_graph["dcs_start_stage"] == 0
+    assert pose_graph["information_mode"] == "configured_diagonal"
+    assert pose_graph["information_residual_order"] == [
+        "tx",
+        "ty",
+        "tz",
+        "rx",
+        "ry",
+        "rz",
+    ]
+    assert pose_graph["information_source"] == (
+        "configured_translation_and_rotation_weights"
+    )
+    experimental_information = pose_graph[
+        "experimental_registration_observability"
+    ]
+    assert experimental_information["status"] == "opt_in_replay_only"
+    assert experimental_information["mode"] == "registration_observability"
+    assert experimental_information["source"] == (
+        "robust_fixed_pose_point_to_plane_hessian_shape"
+    )
+    assert experimental_information["magnitude_policy"] == (
+        "configured_diagonal_is_upper_bound"
+    )
+    assert experimental_information["weak_direction_policy"] == (
+        "bounded_positive_floor"
+    )
+    mismatch_policy = experimental_information[
+        "invalid_or_mismatched_linearization_policy"
+    ]
+    assert mismatch_policy == "configured_diagonal_fallback"
+    assert experimental_information["calibrated_covariance_claim"] is False
+    assert experimental_information["holdout_regression_gate_required"] is True
+    assert pose_graph["commit_only_when_objective_improves"] is True
+    assert "temporal_static_map" not in config["mapping"]
+    archive = config["mapping"]["keyframe_archive"]
+    assert archive["directory_parameter"] == "keyframe_archive_directory"
+    assert archive["default_directory"] == ""
+    assert archive["empty_directory_policy"] == (
+        "disable_archive_scan_retention_and_export"
+    )
+    assert archive["voxel_leaf_parameter"] == "keyframe_archive_voxel_leaf_m"
+    assert archive["default_voxel_leaf_m"] == 0.22
+    assert archive["export_service"] == "~/export_keyframes"
+    assert archive["default_node"] == "/scan_to_map_icp_node"
+    assert archive["service_type"] == "std_srvs/srv/Trigger"
+    assert archive["snapshot_scope"] == "retained_keyframes"
+    assert archive["pruned_keyframes"] == "reported_in_manifest"
+    assert archive["keyframe_ids"] == "stable_monotonic"
+    assert archive["source"] == (
+        "immutable_full_per_sensor_mapping_views_before_terrain_classification"
+    )
+    assert archive["terrain_classifier_source_copy"] == "separate_mutable_copy"
+    assert archive["per_sensor_ray_origin_preserved"] is True
+    assert config["outputs"]["global_map"] == "/slam_3d/map/global_cloud"
+    assert config["outputs"]["global_map_semantics"] == (
+        "temporal_unfiltered_mapping_cloud"
+    )
+    assert "temporal_static_map_candidates_debug" not in config["outputs"]
     assert config["frontend"]["deskew"]["required_frame"] == "cv7_link"
     assert config["frontend"]["deskew"]["imu_to_base_rpy_deg"] == [
         0.0,

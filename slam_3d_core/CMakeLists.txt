@@ -28,11 +28,14 @@ find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(yaml-cpp REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common filters registration)
+find_package(PCL REQUIRED COMPONENTS common filters registration io)
 find_package(Eigen3 REQUIRED)
+find_package(Ceres REQUIRED)
 
 include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
@@ -49,6 +52,18 @@ add_library(indoor_terrain_evidence
 
 add_library(voxel_surfel_registration
   src/voxel_surfel_registration.cpp
+)
+
+add_library(pose_graph_optimizer
+  src/pose_graph_optimizer.cpp
+)
+
+add_library(registration_information
+  src/registration_information.cpp
+)
+
+add_library(keyframe_archive
+  src/keyframe_archive.cpp
 )
 
 target_include_directories(scan_to_map_icp PUBLIC
@@ -71,6 +86,24 @@ target_include_directories(voxel_surfel_registration PUBLIC
   ${Eigen3_INCLUDE_DIRS}
 )
 
+target_include_directories(pose_graph_optimizer PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${Eigen3_INCLUDE_DIRS}
+)
+
+target_include_directories(registration_information PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${Eigen3_INCLUDE_DIRS}
+)
+
+target_include_directories(keyframe_archive PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${Eigen3_INCLUDE_DIRS}
+)
+
 ament_target_dependencies(scan_to_map_icp
   diagnostic_msgs
   geometry_msgs
@@ -79,6 +112,7 @@ ament_target_dependencies(scan_to_map_icp
   rclcpp
   sensor_msgs
   std_msgs
+  std_srvs
   tf2
   tf2_ros
   visualization_msgs
@@ -86,6 +120,9 @@ ament_target_dependencies(scan_to_map_icp
 
 target_link_libraries(scan_to_map_icp
   indoor_terrain_evidence
+  pose_graph_optimizer
+  registration_information
+  keyframe_archive
   voxel_surfel_registration
   ${PCL_LIBRARIES}
   Eigen3::Eigen
@@ -96,6 +133,21 @@ target_link_libraries(indoor_terrain_evidence
 )
 
 target_link_libraries(voxel_surfel_registration
+  ${PCL_LIBRARIES}
+  Eigen3::Eigen
+)
+
+target_link_libraries(pose_graph_optimizer
+  Ceres::ceres
+  Eigen3::Eigen
+)
+
+target_link_libraries(registration_information
+  Eigen3::Eigen
+)
+
+target_link_libraries(keyframe_archive
+  yaml-cpp
   ${PCL_LIBRARIES}
   Eigen3::Eigen
 )
@@ -117,7 +169,13 @@ target_link_libraries(scan_to_map_icp_node
   scan_to_map_icp
 )
 
-install(TARGETS scan_to_map_icp indoor_terrain_evidence voxel_surfel_registration
+install(TARGETS
+  scan_to_map_icp
+  indoor_terrain_evidence
+  pose_graph_optimizer
+  registration_information
+  keyframe_archive
+  voxel_surfel_registration
   EXPORT export_scan_to_map_icp
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -146,11 +204,14 @@ ament_export_dependencies(
   rclcpp
   sensor_msgs
   std_msgs
+  std_srvs
+  yaml-cpp
   tf2
   tf2_ros
   visualization_msgs
   PCL
   Eigen3
+  Ceres
 )
 
 if(BUILD_TESTING)
@@ -168,6 +229,27 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_voxel_surfel_registration
     voxel_surfel_registration
+  )
+  ament_add_gtest(test_pose_graph_optimizer
+    test/test_pose_graph_optimizer.cpp
+  )
+  target_link_libraries(test_pose_graph_optimizer
+    pose_graph_optimizer
+    Eigen3::Eigen
+  )
+  ament_add_gtest(test_registration_information
+    test/test_registration_information.cpp
+  )
+  target_link_libraries(test_registration_information
+    registration_information
+    Eigen3::Eigen
+  )
+  ament_add_gtest(test_keyframe_archive
+    test/test_keyframe_archive.cpp
+  )
+  target_link_libraries(test_keyframe_archive
+    keyframe_archive
+    Eigen3::Eigen
   )
   ament_add_gtest(test_registration_policy
     test/test_registration_policy.cpp
@@ -244,7 +326,16 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/include
   )
   ament_add_pytest_test(test_scan_to_map_config test/test_scan_to_map_config.py)
+  ament_add_pytest_test(
+    test_pose_graph_diagnostic_contract
+    test/test_pose_graph_diagnostic_contract.py
+  )
   ament_add_pytest_test(test_indoor_profiles test/test_indoor_profiles.py)
+  ament_add_pytest_test(
+    test_keyframe_archive_runtime
+    test/test_keyframe_archive_runtime.py
+    TIMEOUT 60
+  )
   ament_add_pytest_test(
     test_submap_runtime
     test/test_submap_runtime.py

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,7 @@
 
 #include "sensor_msgs/msg/point_field.hpp"
 #include "slam_3d_lidar_ingest/hesai_pointcloud_contract.hpp"
+#include "slam_3d_lidar_ingest/point_budget.hpp"
 
 namespace
 {
@@ -24,6 +26,44 @@ using gole::slam_3d_lidar_ingest::selectOutputStartStamp;
 using gole::slam_3d_lidar_ingest::validateHesaiPointCloud;
 
 constexpr std::uint32_t kPointStep = 26;
+
+TEST(PointBudget, PreservesScanExtentOrderingAndEveryRing)
+{
+  using gole::slam_3d_lidar_ingest::stratifiedPointIndex;
+  for (const std::size_t total : {128000U, 240000U, 460800U}) {
+    for (const std::size_t budget : {2U, 31U, 4000U, 6000U, 12000U}) {
+      std::size_t previous = 0;
+      std::set<std::size_t> rings;
+      for (std::size_t i = 0; i < budget; ++i) {
+        const auto index = stratifiedPointIndex(i, budget, total, 3);
+        ASSERT_LT(index, total);
+        if (i > 0) {
+          ASSERT_GT(index, previous);
+        }
+        previous = index;
+        rings.insert(index % 128);
+      }
+      EXPECT_EQ(stratifiedPointIndex(0, budget, total, 3), 0U);
+      EXPECT_EQ(previous, total - 1);
+      if (budget >= 4000U) {
+        EXPECT_EQ(rings.size(), 128U);
+      }
+    }
+  }
+}
+
+TEST(PointBudget, FullBudgetIsIdentityAndSeedChangesInteriorSamples)
+{
+  using gole::slam_3d_lidar_ingest::stratifiedPointIndex;
+  std::size_t changed = 0;
+  for (std::size_t i = 0; i < 1000; ++i) {
+    EXPECT_EQ(stratifiedPointIndex(i, 1000, 1000, 0), i);
+    const auto sample = stratifiedPointIndex(i, 1000, 128000, 1);
+    EXPECT_EQ(sample, stratifiedPointIndex(i, 1000, 128000, 1));
+    changed += sample != stratifiedPointIndex(i, 1000, 128000, 2);
+  }
+  EXPECT_GT(changed, 900U);
+}
 
 sensor_msgs::msg::PointField field(
   const std::string & name,

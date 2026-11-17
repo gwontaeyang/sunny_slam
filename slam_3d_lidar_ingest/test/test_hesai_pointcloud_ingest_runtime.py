@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
 from rclpy.node import Node
@@ -81,7 +82,13 @@ def _status_values(message):
     return {item.key: item.value for item in message.status[0].values}
 
 
-def test_three_hesai_streams_are_normalized_and_model_checked():
+@pytest.mark.parametrize("point_budget,organized,nan_edges", [
+    (0, False, False), (4, False, False), (4, True, False),
+    (2, False, True), (0, False, True),
+])
+def test_three_hesai_streams_are_normalized_and_model_checked(
+    point_budget, organized, nan_edges
+):
     token = uuid.uuid4().hex[:8]
     prefix = f"/hesai_ingest_test/run_{token}"
     sensor_names = ("front", "rear", "center")
@@ -115,6 +122,10 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
         "-p",
         "output_reliable:=true",
         "-p",
+        f"max_output_points:={point_budget}",
+        "-p",
+        f"min_finite_point_ratio:={0.0 if nan_edges else 0.9}",
+        "-p",
         "reject_clock_misalignment:=false",
         "-p",
         "front.expected_input_frame_id:=raw_front",
@@ -144,6 +155,8 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
         "rear.expected_input_frame_id:=raw_rear",
         "-p",
         "rear.min_points:=1",
+        "-p",
+        f"rear.clock_policy:={'anchored_sensor_time' if nan_edges else 'sensor_header'}",
         "-p",
         "center.expected_input_frame_id:=raw_center",
         "-p",
@@ -211,6 +224,23 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
                     return
             raise AssertionError("timed out waiting for ROS runtime condition")
 
+        def initial_cloud(frame, start_s, ring):
+            cloud = _raw_hesai_cloud(frame, start_s, ring, 20 if nan_edges else 8)
+            if nan_edges:
+                struct.pack_into("<f", cloud.data, 0, float("nan"))
+                struct.pack_into(
+                    "<f", cloud.data, 19 * cloud.point_step, float("nan")
+                )
+            if organized:
+                raw = bytes(cloud.data)
+                cloud.width = 4
+                cloud.height = 2
+                cloud.row_step = cloud.width * cloud.point_step + 16
+                padding = bytes([255] * 16)
+                split = 4 * cloud.point_step
+                cloud.data = raw[:split] + padding + raw[split:] + padding
+            return cloud
+
         try:
             wait_until(
                 lambda: all(
@@ -220,16 +250,42 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
                 and test_node.count_publishers(health_topic) == 1
             )
 
+            if nan_edges:
+                rejected_first = _raw_hesai_cloud("raw_rear", 99.0, 127)
+                for index in range(rejected_first.width):
+                    struct.pack_into(
+                        "<f", rejected_first.data,
+                        index * rejected_first.point_step, float("nan")
+                    )
+                publishers["rear"].publish(rejected_first)
+                wait_until(lambda: any(
+                    message.status
+                    and message.status[0].name.endswith("/rear")
+                    and message.status[0].message == "insufficient_finite_points"
+                    and _status_values(message).get("time_anchor_initialized") == "false"
+                    for message in health_messages
+                ))
+                assert not outputs["rear"]
+
             publishers["front"].publish(
-                _raw_hesai_cloud("raw_front", 100.0, 127)
+                initial_cloud("raw_front", 100.0, 127)
             )
             publishers["rear"].publish(
-                _raw_hesai_cloud("raw_rear", 100.002, 127)
+                initial_cloud("raw_rear", 100.002, 127)
             )
             publishers["center"].publish(
-                _raw_hesai_cloud("raw_center", 100.001, 31)
+                initial_cloud("raw_center", 100.001, 31)
             )
             wait_until(lambda: all(outputs[name] for name in sensor_names))
+            if nan_edges:
+                wait_until(lambda: any(
+                    message.status
+                    and message.status[0].name.endswith("/rear")
+                    and _status_values(message).get("time_anchor_initialized") == "true"
+                    and _status_values(message).get("time_anchor_input_header_ns")
+                    == "100002000000"
+                    for message in health_messages
+                ))
 
             expected_fields = {
                 "x": (0, PointField.FLOAT32, 1),
@@ -246,10 +302,13 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
                 "center": "raw_center",
             }
             expected_ids = {"front": 0, "rear": 1, "center": 2}
+            original_count = 20 if nan_edges else 8
             for name in sensor_names:
                 cloud = outputs[name][-1]
                 assert cloud.point_step == 24
-                assert cloud.width == 8
+                assert cloud.width == (point_budget or (18 if nan_edges else 8))
+                assert cloud.row_step == cloud.width * cloud.point_step
+                assert len(cloud.data) == cloud.row_step
                 assert _field_map(cloud) == expected_fields
                 assert cloud.header.frame_id == expected_frames[name]
                 first = struct.unpack_from("<ffffIHBx", cloud.data, 0)
@@ -258,13 +317,36 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
                     cloud.data,
                     (cloud.width - 1) * cloud.point_step,
                 )
-                assert first[4] == 0
+                first_index = 1 if nan_edges else 0
+                last_index = original_count - (2 if nan_edges else 1)
                 expected_last_offset_ns = (
                     150_000_000 if name == "front" else 100_000_000
                 )
-                assert abs(last[4] - expected_last_offset_ns) <= 100
-                assert last[5] == (31 if name == "center" else 127)
+                assert first[4] == pytest.approx(
+                    expected_last_offset_ns * first_index / (original_count - 1), abs=100
+                )
+                assert last[4] == pytest.approx(
+                    expected_last_offset_ns * last_index / (original_count - 1), abs=100
+                )
+                assert last[5] == (
+                    last_index if nan_edges else (31 if name == "center" else 127)
+                )
                 assert first[6] == expected_ids[name]
+                for point in struct.iter_unpack("<ffffIHBx", cloud.data):
+                    original_index = round(point[3] - 20.0)
+                    ratio = original_index / (original_count - 1)
+                    assert point[0] == pytest.approx(5.0 + ratio)
+                    assert point[1] == pytest.approx(-1.0 + 2.0 * ratio)
+                    assert point[2] == pytest.approx(0.1 * (original_index % 3))
+                    assert point[4] == pytest.approx(
+                        expected_last_offset_ns * ratio, abs=100
+                    )
+                    expected_ring = (
+                        (31 if name == "center" else 127)
+                        if original_index == original_count - 1 else original_index
+                    )
+                    assert point[5] == expected_ring
+                    assert point[6] == expected_ids[name]
 
             first_front_stamp = outputs["front"][-1].header.stamp
             first_front_stamp_ns = (
@@ -355,6 +437,20 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
 
             wait_until(center_ring_rejection_seen)
             assert len(outputs["center"]) == prior_center_count
+            if nan_edges:
+                empty_cloud = _raw_hesai_cloud("raw_center", 100.4, 31)
+                for index in range(empty_cloud.width):
+                    struct.pack_into(
+                        "<f", empty_cloud.data, index * empty_cloud.point_step, float("nan")
+                    )
+                publishers["center"].publish(empty_cloud)
+                wait_until(lambda: any(
+                    message.status
+                    and message.status[0].name.endswith("/center")
+                    and message.status[0].message == "insufficient_finite_points"
+                    for message in health_messages
+                ))
+                assert len(outputs["center"]) == prior_center_count
         finally:
             if process.poll() is None:
                 os.killpg(os.getpgid(process.pid), signal.SIGINT)
@@ -366,3 +462,17 @@ def test_three_hesai_streams_are_normalized_and_model_checked():
             test_node.destroy_node()
             rclpy.shutdown()
             client_log_directory.cleanup()
+
+
+@pytest.mark.parametrize("point_budget", [-1, 1, 178956971])
+def test_invalid_point_budget_is_rejected_at_startup(point_budget):
+    with tempfile.TemporaryDirectory(prefix="hesai_budget_test_") as log_dir:
+        environment = os.environ.copy()
+        environment["ROS_LOG_DIR"] = log_dir
+        result = subprocess.run(
+            ["ros2", "run", "slam_3d_lidar_ingest", "hesai_pointcloud_ingest_node",
+             "--ros-args", "-p", f"max_output_points:={point_budget}"],
+            capture_output=True, text=True, timeout=10.0, env=environment,
+        )
+    assert result.returncode != 0
+    assert "max_output_points must be" in result.stdout + result.stderr

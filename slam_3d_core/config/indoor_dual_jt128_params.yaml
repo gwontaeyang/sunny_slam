@@ -141,6 +141,11 @@ scan_to_map_icp_node:
     z_max_m: 6.0
     scan_voxel_leaf_m: 0.15
     map_voxel_leaf_m: 0.20
+    # Legacy guard only: true is rejected. Cleanup belongs to slam_3d_map_cleanup.
+    temporal_static_map_enabled: false
+    # Empty disables archive scan retention and export; global_cloud is uncleaned.
+    keyframe_archive_directory: ''
+    keyframe_archive_voxel_leaf_m: 0.22
     min_scan_points: 500
     crop_box_enabled: true
     crop_min_x: -0.7
@@ -286,6 +291,7 @@ scan_to_map_icp_node:
     place_recognition_submap_consistency_max_rotation_deg: 8.0
 
     pose_graph_correction_enabled: true
+    pose_graph_solver: ceres_se3
     pose_graph_planar_correction_enabled: false
     pose_graph_robust_loop_enabled: true
     pose_graph_distributed_loop_seed_enabled: false
@@ -299,7 +305,23 @@ scan_to_map_icp_node:
     pose_graph_odom_rotation_weight: 1.0
     pose_graph_loop_translation_weight: 2.0
     pose_graph_loop_rotation_weight: 1.5
+    # registration_observability is opt-in until it passes an indoor holdout.
+    pose_graph_information_mode: configured_diagonal
+    pose_graph_information_relative_eigen_threshold: 0.001
+    pose_graph_information_strong_eigenvalue_ratio: 0.05
+    pose_graph_information_weak_ratio: 0.02
     pose_graph_loop_cauchy_scale: 1.0
+    pose_graph_ceres_max_iterations_per_stage: 20
+    pose_graph_ceres_robust_scale_factors: [4.0, 2.0, 1.0]
+    pose_graph_ceres_dcs_enabled: true
+    pose_graph_ceres_dcs_start_stage: 0
+    pose_graph_ceres_dcs_phi: 5.0
+    pose_graph_ceres_dcs_min_scale: 0.05
+    pose_graph_ceres_function_tolerance: 1.0e-6
+    pose_graph_ceres_gradient_tolerance: 1.0e-10
+    pose_graph_ceres_parameter_tolerance: 1.0e-8
+    pose_graph_ceres_num_threads: 2
+    pose_graph_ceres_use_nonmonotonic_steps: false
     pose_graph_min_new_loop_robust_weight: 0.08
     pose_graph_max_iteration_translation_step_m: 0.15
     pose_graph_max_iteration_rotation_step_deg: 3.0

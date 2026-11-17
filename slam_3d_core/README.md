@@ -1,5 +1,54 @@
 # slam_3d_core
 
+## Compute-first indoor preset
+
+Load `config/indoor_compute_budget_overrides.yaml` after the calibrated indoor
+sensor profile. For example, with the current installed package:
+
+```bash
+ros2 run slam_3d_core scan_to_map_icp_node --ros-args \
+  --params-file <calibrated_indoor_sensor_profile.yaml> \
+  --params-file <indoor_compute_budget_overrides.yaml>
+```
+
+Pair it with the ingest package's `compute_budget_overrides.yaml` (4,000 points
+per sensor). The preset limits range to 22 m, scan/map voxels to 0.40/0.35 m,
+surfel iterations to 5, local keyframes to 16 and active submaps to 2. Keyframes,
+place recognition, and global map publication run less
+often or with smaller budgets. Scan frequency, IMU deskew, shock handling,
+3D pose graph and robust loop validation remain enabled. Queue polling runs at
+50 ms instead of 5 ms; this is not scan decimation (dispatch is capped at
+20 scans/s). This preset explicitly selects the voxel-surfel backend; its
+iteration limits do not apply to ICP/GICP.
+
+Online terrain classification and preview/traversal evidence are disabled;
+these topics no longer supply usable terrain maps in this preset. The core
+map remains 3D and temporally unfiltered; cleanup and projection run offline.
+Dense wall detail, weak-feature tracking, offline cleanup evidence, and loop
+recall may decrease. Changing
+the raster resolution downstream cannot recover discarded geometry.
+
+Benchmark CPU seconds for ingest plus core on identical bag data. Wall time at
+a fixed replay rate and parallel speedups alone do not measure reduced compute.
+The 20% CPU target must be measured on the intended input and machine.
+
+Before the offline-cleanup split, one 90 s replay of a recorded fused dual-JT128
+stream measured 28.32 -> 5.24
+CPU seconds for core plus ingest (18.5%), with all 211 scans delivered and
+identical 197 accepted / 14 deskew-rejected scan timestamps. Both runs failed
+the 95% deskew-coverage gate because the recorded IMU had missing coverage/gaps.
+There were no loop events. Upstream fusion, one-time timestamp sorting, bag
+playback, and plots are excluded from that CPU measurement.
+
+This is an experimental compute limit, NOT a quality-preserving replacement:
+the then-online confirmed map fell from 12,590 to 679 points, and estimated path
+length changed from 8.22 to 15.87 m (no ground truth). These are historical
+measurements, not validation of the archive/offline-cleanup workflow. The
+compute preset's point-budget settings remain unchanged by this split.
+Separate physical sensor streams each receive the point cap, so
+their combined budget and end-to-end CPU must be measured again. Evidence is
+under `~/analysis_outputs/slam_3d/37_compute_budget/`.
+
 Learning-oriented GOLE 3D SLAM core code. This is direct C++ implementation,
 not a wrapper around FAST-LIO, LIO-SAM, GLIM, KISS-ICP, or another open-source
 runtime.
@@ -27,11 +76,11 @@ Canonical center XT32 plus queued front/rear JT128 PointCloud2 streams
   -> scan-to-local-submap-map voxel-surfel, ICP, or GICP registration
   -> optional trimmed coarse registration plus narrow-distance refinement
   -> mapping-cloud-only Scan Context-style historical scan retrieval,
-     combined-cloud submap geometry validation, and robust lightweight
-     pose-graph relaxation
+     combined-cloud submap geometry validation, and transactional multi-stage
+     SE(3) pose-graph optimization
   -> shock/recovery state gate for CV prediction, place recognition, and
      persistent keyframe mutation
-  -> obstacle/mapping-cloud-only published keyframe and global map
+  -> temporally unfiltered global mapping cloud and opt-in keyframe archive export
   -> optional gravity-aligned keyframe-local floor/ramp/step/observed-drop/staircase
      evidence with independent-viewpoint voting
   -> optional observer-only terrain preview memory: LiDAR geometry candidate,
@@ -48,6 +97,151 @@ Implemented in:
 
 This is the editable baseline for learning scan registration, keyframe policy,
 local map construction, and three-cloud synchronization.
+
+## Pose Graph Backend
+
+`pose_graph_solver=ceres_se3` selects the indoor backend in
+`pose_graph_optimizer.hpp/.cpp`. The original edge-wise relaxation remains as
+`legacy_relaxation` for replay comparison and planar legacy profiles.
+
+Each keyframe state is a 3D translation plus a unit quaternion. Ceres applies
+rotation updates through `EigenQuaternionParameterization`, so the quaternion
+stays on the SO(3) manifold while the first keyframe is fixed to remove gauge
+freedom. For an edge measurement `Z_ij`, the six residual components are the
+relative translation error in frame `i` and the multiplicative quaternion
+error `2 vec(q_error)`. Every edge carries a symmetric full `6x6` information
+matrix in `[tx, ty, tz, rx, ry, rz]` residual order. The
+`configured_diagonal` mode reproduces the original independent translation and
+rotation weights and remains the indoor default after full-bag regression.
+The opt-in `registration_observability` mode evaluates a robust point-to-plane
+Gauss-Newton Hessian at the final accepted pose, transported from map-frame
+`[rx, ry, rz, tx, ty, tz]` perturbations into the edge residual frame, and
+eigen-decomposed after normalization by the configured weights. Weak geometric
+directions are reduced to a bounded floor while no direction can become
+stronger than the configured baseline. Current-scan loop measurements include
+the latest-keyframe-to-scan lever arm. A failed quality gate, invalid Hessian,
+or changed loop linearization point falls back to the configured diagonal
+matrix. Ceres obtains the Jacobians with automatic differentiation and solves
+the sparse normal system with Levenberg-Marquardt and sparse Cholesky.
+
+Loop optimization is deliberately staged:
+
+1. Descriptor, temporal exclusion, submap consistency, and point-cloud
+   registration reject weak loop candidates before graph mutation.
+2. A verified large loop may receive the existing path-distributed SE(3) seed
+   to move the initial estimate into the nonlinear solver's convergence basin.
+3. Ceres solves the entire connected graph with Cauchy scales of `4x`, `2x`,
+   and `1x`. Sequential LiDAR edges remain quadratic; only loop edges are
+   robustified.
+4. At every stage, Dynamic Covariance Scaling (DCS) computes
+   `s=min(1, 2*phi/(phi+chi2))` for every loop and scales its information by
+   `s^2`. The next stage therefore sees the residual consistency discovered by
+   the preceding solve.
+5. A new loop whose final DCS scale is below
+   `pose_graph_min_new_loop_robust_weight` is removed. The candidate solution
+   must also improve the separately evaluated fixed Cauchy objective and pass
+   the existing residual and ground-motion gates.
+6. Only then are keyframe poses committed. Every keyframe-local cloud, submap,
+   path sample, and terrain sample is reprojected. Archive export captures the
+   latest corrected poses with immutable local sensor views; any failed stage
+   leaves the graph and map unchanged.
+
+The first-stage and last-stage Ceres costs are reported separately because the
+robust scale and DCS weights change between stages; they are not directly
+comparable. The fixed-kernel `pose_graph_robust_objective_before/after` values
+remain the transactional acceptance metric. Solver stages, accepted/rejected
+LM steps, final gradient, DCS downweight count, and new-loop DCS scale are also
+published in `/slam_3d/health`.
+The Cauchy scale and DCS `phi` operate in the information-weighted residual
+space, not in meters alone. Changing edge information therefore requires a
+joint replay calibration of both robust parameters.
+
+When enabled, the registration Hessian is used only for its directional shape.
+It is not reported as a statistically calibrated ICP covariance: nearest-neighbor
+rematching, shared submap points, robust weighting, and correlated LiDAR
+samples violate the independent fixed-correspondence assumptions needed for
+that claim. The configured information remains the explicit magnitude bound.
+
+Primary references for this implementation are the Ceres 3D pose-graph
+example, Agarwal et al.'s Dynamic Covariance Scaling, Suenderhauf and Protzel's
+Switchable Constraints, and Grisetti et al.'s graph-SLAM tutorial:
+
+- https://ceres-solver.readthedocs.io/latest/nnls_tutorial.html
+- https://ceres-solver.googlesource.com/ceres-solver/+/master/examples/slam/pose_graph_3d/pose_graph_3d_error_term.h
+- https://www.ipb.uni-bonn.de/wp-content/papercite-data/pdf/agarwal13icraws.pdf
+- https://nikosuenderhauf.github.io/assets/papers/IROS12-switchableConstraints.pdf
+- https://doi.org/10.1109/MITS.2010.939925
+- https://research.google.com/pubs/archive/45466.pdf
+- https://gisbi-kim.github.io/publications/gkim-2018-iros.pdf
+- https://arxiv.org/abs/1909.08605
+- https://censi.science/pub/research/2007-icra-icpcov.pdf
+- https://arxiv.org/abs/1410.7632
+- https://arxiv.org/abs/2211.16335
+
+Switchable Constraints and Graduated Non-Convexity are alternative robust
+outer-loop strategies, not extra kernels stacked into the current solve.
+Applying Cauchy, DCS, switch variables, and GNC to the same loop simultaneously
+would make the effective information difficult to interpret. DCS is used here
+because its closed-form scale adds no latent graph state. A switch-variable or
+GNC backend should be evaluated as a controlled A/B against DCS instead.
+
+## Offline Map Cleanup Migration
+
+`/slam_3d/map/global_cloud` is now temporally unfiltered mapping geometry. Normal
+range/z/self filters, mapping voxelization, and registration-only input exclusion
+still apply. It is not the confirmed-static output of `slam_3d_map_cleanup`.
+Registration targets, submaps, descriptors, loop verification, and the pose graph
+remain core responsibilities; offline cleanup does not feed back into them.
+
+`temporal_static_map_enabled=true` throws `std::invalid_argument` with migration
+guidance. `false` is accepted only as a legacy guard. Remove all other
+`temporal_static_map_*` parameters and the former temporal-candidates topic.
+Cleanup thresholds now live in
+[`slam_3d_map_cleanup/config/indoor.yaml`](../slam_3d_map_cleanup/config/indoor.yaml).
+
+Configure the archive before mapping in the selected core parameter file:
+
+```yaml
+scan_to_map_icp_node:
+  ros__parameters:
+    keyframe_archive_directory: /absolute/path/to/new_keyframe_archive
+    keyframe_archive_voxel_leaf_m: 0.22
+```
+
+The default directory is `''`: it disables archive-specific scan retention and
+export without disabling ordinary SLAM keyframes or terrain evidence. The
+archive keeps mapping-only, deskewed base-frame sensor views before terrain
+classification, with sensor origins, keyframe stamps, stable monotonic IDs, and
+the latest corrected SE(3) poses. These views are filtered/downsampled evidence,
+not original raw scans. The manifest reports `snapshot_scope: retained_keyframes`
+and `pruned_keyframes`; entries removed by `max_keyframes` are not recovered.
+
+After mapping and any graph correction, export while the node is still running:
+
+```bash
+ros2 service call /scan_to_map_icp_node/export_keyframes std_srvs/srv/Trigger '{}'
+```
+
+The service is private `~/export_keyframes`; the launch default node name is
+`/scan_to_map_icp_node`. Use the renamed/namespaced node path when launch overrides
+it. Trigger uses the configured archive directory, not a path in its request.
+Check `success` and the response message before starting the separate CLI:
+
+```bash
+ros2 run slam_3d_map_cleanup temporal_map_cleanup \
+  --input /absolute/path/to/new_keyframe_archive \
+  --output-dir /absolute/path/to/new_cleaned_map \
+  --config install/slam_3d_map_cleanup/share/slam_3d_map_cleanup/config/indoor.yaml
+```
+
+Use a new output directory with an existing parent, separate from the archive.
+`map_static.pcd` contains confirmed geometry; `map_rejected.pcd` contains
+unconfirmed evidence, not semantic person-only labels. `map_unfiltered.pcd`
+contains all cleanup candidate voxel centroids, not the original core global
+cloud. Each synchronized keyframe remains one observation across its sensor
+views. Re-export and rerun cleanup after later graph corrections; use a trajectory
+from the same corrected state for projection. Cleanup is geometric persistence
+evidence, not person detection or object tracking.
 
 An auxiliary input marked `secondary_cloud_registration_only` or
 `tertiary_cloud_registration_only` is voxelized and capped relative to the
@@ -209,6 +403,10 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
 
 ## Deliberate Limitations
 
+- The core global map retains transient geometry. The separate offline cleanup
+  is geometric persistence evidence, not a person detector: a stationary person
+  can be promoted and a surface seen only once can remain tentative. Archive
+  export covers only retained keyframes and cannot reconstruct pruned history.
 - IMU data is buffered for an optional gyro-only rotation deskew step. This MVP
   requires a `PointCloud2` field such as `timestamp`, `time`, `t`, or
   `offset_time`; it does not estimate translation during the scan and is not
@@ -266,13 +464,15 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
   and performs PointCloud2 conversion and DDS publication outside the frontend
   state lock. A slow map subscriber therefore cannot occupy an executor thread
   while registration owns the state.
-- There is still no production-grade loop closure, submap persistence, or
-  relocalization. The current backend is a small internal keyframe pose graph:
-  odometry edges are added between consecutive keyframes, a loop edge is added
-  when place recognition is accepted, and a bounded iterative relaxation moves
-  keyframe poses, reprojects their stored base-frame clouds, and updates the
-  published path history. It is designed to be edited and inspected before
-  replacing it with GTSAM/iSAM2 or another robust factor-graph backend.
+- Loop closure remains a learning-oriented batch backend rather than a
+  production incremental smoother. Consecutive LiDAR edges and verified loop
+  edges are solved as a connected sparse SE(3) graph with Ceres in indoor
+  profiles. The optional registration-observability mode supplies bounded full
+  `6x6` directional information, but it is not a calibrated covariance
+  estimate and requires a dataset-specific replay regression before use. Graph
+  solving is synchronous, and there are no IMU preintegration, bias, velocity,
+  or covariance states. The legacy edge-wise relaxation remains available only
+  for comparison and planar legacy profiles.
 - Terrain labels are approach-direction dependent: the same ledge can appear as
   a positive step from one side and an observed drop from the other. The
   preview state must not be injected as a direct loop edge. A future
@@ -459,8 +659,10 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
   keyframe correction applied to the current motion-prior pose, so loop closure
   does not become an unbounded single-frame snap. Diagnostics include
   `pose_graph_edges`, `pose_graph_loop_edges`, residual before/after, optimizer
-  iteration count, and max per-iteration update. This is still intentionally
-  lightweight and lacks covariance modeling, IMU preintegration, and incremental
+  iteration count, max per-iteration update, registration-information edge
+  count, minimum observable rank, Hessian condition, and minimum directional
+  gain. This is still intentionally lightweight and lacks statistically
+  calibrated covariance modeling, IMU preintegration, and incremental
   relinearization.
   `place_recognition_mapping_cloud_refinement_enabled` adds an optional second
   geometric check using the map-output cloud. Its target is limited to a
@@ -479,8 +681,11 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
   repeated scans against the same anchor. Both settings default to the original
   one-edge behavior. These checks prevent the active scan from reinforcing its
   own target and reject small repeated patches, but the confirmed voxels are
-  still correlated LiDAR evidence rather than ground truth. The loop information
-  matrix is not yet derived from registration covariance.
+  still correlated LiDAR evidence rather than ground truth. With
+  `pose_graph_information_mode=registration_observability`, the accepted
+  fixed-pose point-to-plane Hessian supplies only the bounded directional shape
+  of the loop information matrix. It deliberately does not claim an inverse
+  Hessian is a calibrated registration covariance.
   `place_recognition_mapping_refinement_required_for_pose_graph` makes this
   frozen-map check a fail-closed prerequisite for every pose-graph loop. A
   candidate that passes the ordinary pose-jump gate cannot bypass a failed
@@ -507,8 +712,8 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
   still-drifted active pose. IMU/ground consistency is then enforced by the
   graph's ground-sequence and same-layer constraints.
   `pose_graph_distributed_loop_seed_enabled` can then distribute the verified
-  endpoint SE(3) correction over cumulative keyframe travel before the existing
-  graph relaxation. The historical anchor is fixed, the newest node is seeded
+  endpoint SE(3) correction over cumulative keyframe travel before the selected
+  graph solver. The historical anchor is fixed, the newest node is seeded
   exactly at the loop target, and every stored keyframe cloud is reprojected
   only if the seeded graph strictly lowers the robust objective and all normal
   post-optimization residual checks pass. This option additionally requires
@@ -518,9 +723,8 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
   candidate/submap registration, not from a later quality refresh against the
   still-drifted active local map. The exact values used by the backend are
   published as `pose_graph_constraint_*` diagnostics. It is an
-  initialization aid for the inspectable internal solver, not permission to
-  accept an unverified map snap or a replacement for a sparse nonlinear graph
-  optimizer.
+  initialization aid for the nonlinear solver, not permission to accept an
+  unverified map snap.
   `pose_graph_correction_min_interval_s` is a global throttle between accepted
   graph corrections. A long interval can suppress a distinct return-to-start
   loop shortly after another loop, even though exact source/target submap pairs
@@ -541,20 +745,22 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
   This is explicitly disabled by default because the same-XY/same-Z assumption
   is invalid in multi-storey maps, bridges, and vertically overlapping paths.
   `pose_graph_minimum_interval_override_single_floor_z_weight_multiplier`
-  strengthens only the map-frame Z component of that confirmed single-floor loop
-  edge. XY and rotation retain the normal loop weights, and registration-only
-  vertical-recovery loops are not strengthened.
-  `pose_graph_robust_loop_enabled` optionally applies a Cauchy IRLS weight to
-  loop edges only. Consecutive odometry edges retain their configured weights.
-  `pose_graph_loop_cauchy_scale` controls the transition from least-squares-like
-  behavior to strong downweighting. Raw squared residual and robust objective
-  are reported separately, together with the newest/minimum loop weight and the
-  count of downweighted loop edges. This is an inspectable approximation of the
-  robust pose-graph treatment used by systems such as Wildcat, not a replacement
-  for a sparse nonlinear solver with properly modeled factor covariances.
+  strengthens only the constraint-frame z residual of that confirmed
+  single-floor loop edge. For gravity-aligned ground-robot keyframes this is
+  approximately the vertical residual. XY and rotation retain the normal loop
+  weights, and registration-only vertical-recovery loops are not strengthened.
+  `pose_graph_robust_loop_enabled` applies Cauchy loss to loop edges only.
+  Consecutive LiDAR edges retain their quadratic information. With
+  `pose_graph_solver=ceres_se3`, the scale is annealed by
+  `pose_graph_ceres_robust_scale_factors`, while DCS independently updates each
+  loop information matrix between solves. Raw squared residual and the fixed
+  base-scale Cauchy objective are reported separately so transactional
+  acceptance is not confused with changing stage costs.
   `pose_graph_min_new_loop_robust_weight` rejects a newly proposed loop before
-  graph relaxation when the Cauchy kernel already regards it as an extreme
-  outlier. It only applies when robust loop weighting is enabled. Enabling the
+  optimization when the Cauchy kernel already regards it as an extreme outlier.
+  The same threshold rejects the edge after optimization when final DCS still
+  regards the new loop as inconsistent. It only applies when robust loop
+  weighting is enabled. Enabling the
   robust loop kernel also makes pose-graph validation mandatory for an accepted
   place match; if the proposed loop is rejected, the frontend restores the
   pre-place-recognition registration instead of retaining the unvalidated pose
@@ -578,11 +784,13 @@ confidence fields beyond diagnostics, and 2D projection remain deferred.
   `pose_graph_max_loop_residual_before` is a cheaper pre-optimization gate for
   the prospective loop edge itself. Keep it at `0.0` for disabled/default runs;
   enable it in HILTI-style sweeps when rejected loop candidates are spending too
-  much time in full graph relaxation.
+  much time in the full graph solve.
   `pose_graph_planar_correction_enabled` can be enabled for HILTI-like shaky
   handheld or mostly-ground-robot tests so loop closure corrects x/y/yaw while
   leaving z/roll/pitch to IMU/deskew and local registration. This avoids a bad
-  3D loop match tilting an entire construction-site map.
+  3D loop match tilting an entire construction-site map. It therefore requires
+  `pose_graph_solver=legacy_relaxation`; `ceres_se3` intentionally requires
+  full 3D.
 - `planar_pose_constraint_enabled` defaults to `false`. When enabled, accepted
   frontend poses keep x/y/yaw from registration but force roll/pitch to the map
   gravity frame and optionally clamp z correction around the motion prior with
@@ -825,7 +1033,7 @@ Parameters live in `config/scan_to_map_icp_params.yaml`.
   - `/slam_3d/frontend/odom`
   - `/slam_3d/frontend/path`
   - `/slam_3d/map/active_submap`
-  - `/slam_3d/map/global_cloud`
+  - `/slam_3d/map/global_cloud` as temporally unfiltered mapping geometry
   - `/slam_3d/terrain/evidence` as persistent indoor 3D terrain labels when
     `terrain_evidence_enabled=true`
   - `/slam_3d/terrain/evidence_colored` as the fixed semantic RGB view of the
@@ -848,12 +1056,13 @@ Parameters live in `config/scan_to_map_icp_params.yaml`.
 4. Replace wheel odom pose-delta prediction with a covariance-weighted planar
    velocity prior and slip rejection.
 5. Promote the optional ring/sector descriptor into a tested Scan Context or
-   Quatro-style place recognition module and replace the internal relaxation
-   backend with a robust GTSAM/iSAM2 factor graph.
+   Quatro-style place recognition module, then evaluate an incremental
+   GTSAM/iSAM2 smoother against the current batch Ceres backend.
 6. Add point-wise deskew covariance and vibration-aware registration weights so
    an impact is handled continuously in addition to frame-level quarantine.
-7. Add directional localizability constraints and covariance-aware pose-graph
-   factors for corridor and stair degeneracy.
+7. Calibrate the new directional pose-graph information against independent
+   corridor, stair, and open-space datasets, then compare it with a
+   rematching-aware registration covariance estimator.
 8. Preserve sensor/ring identity through multi-LiDAR ingest, then add explicit
    free-space and occlusion evidence for negative-obstacle confirmation.
 
@@ -867,11 +1076,19 @@ Parameters live in `config/scan_to_map_icp_params.yaml`.
 - KISS-ICP: https://github.com/PRBonn/kiss-icp
 - Trimmed ICP: https://doi.org/10.1109/ICPR.2002.1047997
 - X-ICP: https://arxiv.org/abs/2211.16335
+- An Accurate Closed-form Estimate of ICP's Covariance (Censi):
+  https://censi.science/pub/research/2007-icra-icpcov.pdf
+- On the Covariance of ICP-based Scan-matching Techniques (Bonnabel et al.):
+  https://arxiv.org/abs/1410.7632
 - Vibration-Aware LiDAR-Inertial Odometry: https://arxiv.org/abs/2507.04311
 - TRAVEL traversability estimation: https://arxiv.org/abs/2206.03190
 - Fast Staircase Detection and Estimation: https://arxiv.org/abs/2211.00610
 - G-VOM elevation mapping: https://arxiv.org/abs/2109.13176
 - Wildcat continuous-time LiDAR-inertial SLAM: https://arxiv.org/abs/2205.12595
 - Dynamic Covariance Scaling: https://doi.org/10.1109/ICRA.2013.6630557
+- Ceres Solver 3D pose graph example:
+  https://ceres-solver.readthedocs.io/latest/nnls_tutorial.html
+- Switchable Constraints for Robust Pose Graph SLAM:
+  https://nikosuenderhauf.github.io/assets/papers/IROS12-switchableConstraints.pdf
 - PCL registration module:
   https://pointclouds.org/documentation/group__registration.html

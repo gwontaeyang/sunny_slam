@@ -161,10 +161,32 @@ frontend:
       - correction_rotation_deg
       - observable_rank
       - residual_distribution
+      - registration_information_valid
+      - registration_information_observable_rank
+      - registration_information_hessian_condition
+      - registration_information_evaluation_runtime_ms
       - pose_graph_optimization_runtime_ms
       - pose_graph_mean_iteration_runtime_ms
       - pose_graph_solver_status
       - pose_graph_convergence_reason
+      - pose_graph_solver_stages
+      - pose_graph_solver_successful_steps
+      - pose_graph_solver_unsuccessful_steps
+      - pose_graph_dcs_downweighted_loop_edges
+      - pose_graph_dcs_min_scale
+      - pose_graph_new_loop_dcs_scale
+      - pose_graph_solver_first_stage_initial_cost
+      - pose_graph_solver_last_stage_final_cost
+      - pose_graph_solver_final_gradient_max_norm
+      - pose_graph_robust_objective_before
+      - pose_graph_robust_objective_after
+      - pose_graph_registration_information_edges
+      - pose_graph_configured_diagonal_information_edges
+      - pose_graph_minimum_registration_observable_rank
+      - pose_graph_maximum_registration_hessian_condition
+      - pose_graph_minimum_registration_information_gain
+      - pose_graph_new_loop_registration_information_used
+      - pose_graph_new_loop_information_status
 
 mapping:
   spatial_mode: se3
@@ -185,11 +207,46 @@ mapping:
     consecutive_geometric_confirmation: required
   pose_graph:
     dimensions: se3
+    solver: ceres_se3
+    nonlinear_method: levenberg_marquardt
+    linear_solver: sparse_normal_cholesky
     edge_types:
       - frontend_between
       - verified_loop
     robust_loop_kernel: cauchy
+    robust_scale_schedule: [4.0, 2.0, 1.0]
+    loop_outer_reweight: dynamic_covariance_scaling
+    dcs_start_stage: 0
+    information_mode: configured_diagonal
+    information_residual_order: [tx, ty, tz, rx, ry, rz]
+    information_source: configured_translation_and_rotation_weights
+    experimental_registration_observability:
+      status: opt_in_replay_only
+      mode: registration_observability
+      source: robust_fixed_pose_point_to_plane_hessian_shape
+      magnitude_policy: configured_diagonal_is_upper_bound
+      weak_direction_policy: bounded_positive_floor
+      invalid_or_mismatched_linearization_policy: configured_diagonal_fallback
+      calibrated_covariance_claim: false
+      holdout_regression_gate_required: true
     commit_only_when_objective_improves: true
+  keyframe_archive:
+    directory_parameter: keyframe_archive_directory
+    default_directory: ''
+    empty_directory_policy: disable_archive_scan_retention_and_export
+    voxel_leaf_parameter: keyframe_archive_voxel_leaf_m
+    default_voxel_leaf_m: 0.22
+    export_service: ~/export_keyframes
+    default_node: /scan_to_map_icp_node
+    service_type: std_srvs/srv/Trigger
+    snapshot_scope: retained_keyframes
+    pruned_keyframes: reported_in_manifest
+    keyframe_ids: stable_monotonic
+    source: immutable_full_per_sensor_mapping_views_before_terrain_classification
+    terrain_classifier_source_copy: separate_mutable_copy
+    per_sensor_ray_origin_preserved: true
+    pose_graph_update: export_local_sensor_clouds_with_latest_corrected_se3
+    registration_and_loop_authority: unchanged_mapping_cloud
   terrain_evidence:
     frame: map
     classification_frame: keyframe_local_yaw_neutral_gravity
@@ -255,11 +312,44 @@ mapping:
     future_loop_role: diagnostic_then_conflict_veto_only
     intensity_encoding: ten_times_terrain_label_plus_preview_state
 
+offline_map_cleanup:
+  package: slam_3d_map_cleanup
+  executable: temporal_map_cleanup
+  config: config/indoor.yaml
+  scope: derived_offline_map_only
+  source: exported_keyframe_archive
+  states: [tentative, confirmed_static]
+  hit_unit: synchronized_keyframe_not_sensor_count
+  per_sensor_ray_origin_preserved: true
+  prior_free_space:
+    enabled: true
+    count_unit: synchronized_keyframe
+    evidence_cap: bounded_per_voxel
+    first_hit_action: seed_miss_evidence_then_allow_recovery
+    ground_grazing_guard:
+      scope: first_hit_prior_free_only
+      max_sensor_vertical_drop_m: 0.9
+      existing_candidate_ray_miss: unchanged
+      assumption: gravity_level_ground_vehicle_profile
+      generalization_status: dufomap_neighborhood_or_shadow_range_not_implemented
+  promotion_requires:
+    - distinct_keyframe_hits
+    - temporal_or_viewpoint_separation
+    - minimum_hit_ratio
+  revocation_requires:
+    - free_space_ray_misses
+    - retention_ratio_failure
+    - miss_hysteresis
+  pose_graph_update: rerun_from_exported_local_sensor_clouds_with_corrected_se3
+  registration_and_loop_authority: unchanged_mapping_cloud
+  semantic_person_detection: excluded
+
 outputs:
   frontend_odom: /slam_3d/frontend/odom
   frontend_path: /slam_3d/frontend/path
   active_submap: /slam_3d/map/active_submap
   global_map: /slam_3d/map/global_cloud
+  global_map_semantics: temporal_unfiltered_mapping_cloud
   terrain_evidence: /slam_3d/terrain/evidence
   terrain_evidence_colored: /slam_3d/terrain/evidence_colored
   terrain_support_evidence: /slam_3d/terrain/support_evidence
@@ -295,6 +385,9 @@ validation:
     - terrain_conflicted_voxel_count
     - no_unobserved_void_promoted_to_drop
     - map_overlap_visual_review
+    - keyframe_archive_snapshot_scope_and_pruned_keyframes_review
+    - offline_map_cleanup_confirmed_rejected_voxel_review
+    - offline_map_cleanup_runtime_review
     - loop_candidate_accept_reject_audit
     - pre_and_post_pose_graph_residual_review
 
@@ -329,6 +422,10 @@ references:
     url: https://arxiv.org/abs/2507.04311
   - name: X-ICP
     url: https://arxiv.org/abs/2211.16335
+  - name: Censi_ICP_Covariance
+    url: https://censi.science/pub/research/2007-icra-icpcov.pdf
+  - name: Bonnabel_ICP_Covariance
+    url: https://arxiv.org/abs/1410.7632
   - name: TRAVEL
     url: https://arxiv.org/abs/2206.03190
   - name: Fast_Staircase_Detection_and_Estimation

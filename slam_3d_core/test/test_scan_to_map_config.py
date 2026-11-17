@@ -141,6 +141,12 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["registration_only_cloud_max_point_ratio"] > 0.0
     assert params["registration_only_cloud_max_points"] >= 0
     assert params["map_voxel_leaf_m"] > 0.0
+    assert params["temporal_static_map_enabled"] is False
+    assert {
+        key for key in params if key.startswith("temporal_static_map_")
+    } == {"temporal_static_map_enabled"}
+    assert params["keyframe_archive_directory"] == ""
+    assert params["keyframe_archive_voxel_leaf_m"] == 0.22
     assert params["max_icp_iterations"] > 0
     assert params["icp_max_correspondence_m"] > 0.0
     assert params["fitness_score_threshold"] > 0.0
@@ -408,6 +414,7 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["place_recognition_registration_only_consistency_max_gap_s"] == 0.0
     assert params["place_recognition_submap_consistency_max_rotation_deg"] == 0.0
     assert params["pose_graph_correction_enabled"] is False
+    assert params["pose_graph_solver"] == "legacy_relaxation"
     assert params["pose_graph_planar_correction_enabled"] is False
     assert params["pose_graph_robust_loop_enabled"] is False
     assert params["pose_graph_distributed_loop_seed_enabled"] is False
@@ -544,7 +551,28 @@ def test_registration_and_map_parameters_are_bounded():
     assert params["pose_graph_odom_rotation_weight"] >= 0.0
     assert params["pose_graph_loop_translation_weight"] >= 0.0
     assert params["pose_graph_loop_rotation_weight"] >= 0.0
+    assert params["pose_graph_information_mode"] == "configured_diagonal"
+    assert 0.0 < params["pose_graph_information_relative_eigen_threshold"] <= 1.0
+    assert (
+        params["pose_graph_information_relative_eigen_threshold"]
+        <= params["pose_graph_information_strong_eigenvalue_ratio"]
+        <= 1.0
+    )
+    assert 0.0 < params["pose_graph_information_weak_ratio"] <= 1.0
     assert params["pose_graph_loop_cauchy_scale"] > 0.0
+    assert params["pose_graph_ceres_max_iterations_per_stage"] > 0
+    robust_stages = params["pose_graph_ceres_robust_scale_factors"]
+    assert len(robust_stages) >= 2
+    assert all(scale > 0.0 for scale in robust_stages)
+    assert params["pose_graph_ceres_dcs_enabled"] is True
+    assert 0 <= params["pose_graph_ceres_dcs_start_stage"] < len(robust_stages)
+    assert params["pose_graph_ceres_dcs_phi"] > 0.0
+    assert 0.0 <= params["pose_graph_ceres_dcs_min_scale"] <= 1.0
+    assert params["pose_graph_ceres_function_tolerance"] >= 0.0
+    assert params["pose_graph_ceres_gradient_tolerance"] >= 0.0
+    assert params["pose_graph_ceres_parameter_tolerance"] >= 0.0
+    assert params["pose_graph_ceres_num_threads"] >= 1
+    assert params["pose_graph_ceres_use_nonmonotonic_steps"] is False
     assert params["pose_graph_min_new_loop_robust_weight"] == 0.0
     assert params["pose_graph_max_iteration_translation_step_m"] > 0.0
     assert params["pose_graph_max_iteration_rotation_step_deg"] > 0.0

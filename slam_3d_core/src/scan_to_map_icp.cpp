@@ -505,6 +505,13 @@ void ScanToMapIcp::setupParameters()
   global_map_topic_ = declare_parameter<std::string>(
     "global_map_topic",
     "/slam_3d/map/global_cloud");
+  keyframe_archive_directory_ = declare_parameter<std::string>(
+    "keyframe_archive_directory", "");
+  keyframe_archive_voxel_leaf_m_ = declare_parameter<double>(
+    "keyframe_archive_voxel_leaf_m", 0.22);
+  if (!std::isfinite(keyframe_archive_voxel_leaf_m_) || keyframe_archive_voxel_leaf_m_ <= 0.0) {
+    throw std::invalid_argument("keyframe_archive_voxel_leaf_m must be finite and positive");
+  }
   terrain_evidence_topic_ = declare_parameter<std::string>(
     "terrain_evidence_topic",
     "/slam_3d/terrain/evidence");
@@ -609,6 +616,12 @@ void ScanToMapIcp::setupParameters()
   pose_graph_correction_enabled_ = declare_parameter<bool>(
     "pose_graph_correction_enabled",
     false);
+  pose_graph_solver_ = declare_parameter<std::string>(
+    "pose_graph_solver",
+    "legacy_relaxation");
+  pose_graph_information_mode_ = declare_parameter<std::string>(
+    "pose_graph_information_mode",
+    "configured_diagonal");
   pose_graph_planar_correction_enabled_ = declare_parameter<bool>(
     "pose_graph_planar_correction_enabled",
     false);
@@ -727,6 +740,11 @@ void ScanToMapIcp::setupParameters()
     "registration_only_cloud_max_point_ratio",
     0.50);
   map_voxel_leaf_m_ = declare_parameter<double>("map_voxel_leaf_m", 0.35);
+  if (declare_parameter<bool>("temporal_static_map_enabled", false)) {
+    throw std::invalid_argument(
+            "temporal_static_map_enabled moved to slam_3d_map_cleanup; disable the old flag, "
+            "set keyframe_archive_directory, export keyframes and run temporal_map_cleanup");
+  }
   local_map_radius_m_ = declare_parameter<double>("local_map_radius_m", 35.0);
   local_map_vertical_radius_m_ = declare_parameter<double>(
     "local_map_vertical_radius_m",
@@ -1083,9 +1101,54 @@ void ScanToMapIcp::setupParameters()
   pose_graph_loop_rotation_weight_ = declare_parameter<double>(
     "pose_graph_loop_rotation_weight",
     1.0);
+  pose_graph_information_config_.relative_eigen_threshold = declare_parameter<double>(
+    "pose_graph_information_relative_eigen_threshold",
+    pose_graph_information_config_.relative_eigen_threshold);
+  pose_graph_information_config_.strong_eigenvalue_ratio = declare_parameter<double>(
+    "pose_graph_information_strong_eigenvalue_ratio",
+    pose_graph_information_config_.strong_eigenvalue_ratio);
+  pose_graph_information_config_.weak_information_ratio = declare_parameter<double>(
+    "pose_graph_information_weak_ratio",
+    pose_graph_information_config_.weak_information_ratio);
   pose_graph_loop_cauchy_scale_ = declare_parameter<double>(
     "pose_graph_loop_cauchy_scale",
     1.0);
+  pose_graph_optimizer_config_.max_iterations_per_stage = declare_parameter<int>(
+    "pose_graph_ceres_max_iterations_per_stage",
+    20);
+  pose_graph_optimizer_config_.robust_scale_factors =
+    declare_parameter<std::vector<double>>(
+    "pose_graph_ceres_robust_scale_factors",
+    std::vector<double>{4.0, 2.0, 1.0});
+  pose_graph_optimizer_config_.dcs_enabled = declare_parameter<bool>(
+    "pose_graph_ceres_dcs_enabled",
+    true);
+  pose_graph_optimizer_config_.dcs_start_stage = declare_parameter<int>(
+    "pose_graph_ceres_dcs_start_stage",
+    0);
+  pose_graph_optimizer_config_.dcs_phi = declare_parameter<double>(
+    "pose_graph_ceres_dcs_phi",
+    5.0);
+  pose_graph_optimizer_config_.dcs_min_scale = declare_parameter<double>(
+    "pose_graph_ceres_dcs_min_scale",
+    0.05);
+  pose_graph_optimizer_config_.function_tolerance = declare_parameter<double>(
+    "pose_graph_ceres_function_tolerance",
+    1.0e-6);
+  pose_graph_optimizer_config_.gradient_tolerance = declare_parameter<double>(
+    "pose_graph_ceres_gradient_tolerance",
+    1.0e-10);
+  pose_graph_optimizer_config_.parameter_tolerance = declare_parameter<double>(
+    "pose_graph_ceres_parameter_tolerance",
+    1.0e-8);
+  pose_graph_optimizer_config_.num_threads = declare_parameter<int>(
+    "pose_graph_ceres_num_threads",
+    1);
+  pose_graph_optimizer_config_.use_nonmonotonic_steps = declare_parameter<bool>(
+    "pose_graph_ceres_use_nonmonotonic_steps",
+    false);
+  pose_graph_optimizer_config_.robust_loop_enabled = pose_graph_robust_loop_enabled_;
+  pose_graph_optimizer_config_.loop_cauchy_scale = pose_graph_loop_cauchy_scale_;
   pose_graph_min_new_loop_robust_weight_ = declare_parameter<double>(
     "pose_graph_min_new_loop_robust_weight",
     0.0);
@@ -1963,6 +2026,43 @@ void ScanToMapIcp::setupParameters()
     throw std::invalid_argument(
             "pose_graph_loop_cauchy_scale must be > 0 when robust loops are enabled");
   }
+  if (pose_graph_solver_ != "legacy_relaxation" &&
+    pose_graph_solver_ != "ceres_se3")
+  {
+    throw std::invalid_argument(
+            "pose_graph_solver must be legacy_relaxation or ceres_se3");
+  }
+  if (pose_graph_information_mode_ != "configured_diagonal" &&
+    pose_graph_information_mode_ != "registration_observability")
+  {
+    throw std::invalid_argument(
+            "pose_graph_information_mode must be configured_diagonal or "
+            "registration_observability");
+  }
+  if (pose_graph_information_mode_ == "registration_observability" &&
+    pose_graph_solver_ != "ceres_se3")
+  {
+    throw std::invalid_argument(
+            "pose_graph_information_mode=registration_observability requires "
+            "pose_graph_solver=ceres_se3");
+  }
+  if (!validRegistrationInformationConfig(pose_graph_information_config_)) {
+    throw std::invalid_argument("pose graph registration information configuration is invalid");
+  }
+  if (pose_graph_solver_ == "ceres_se3" && pose_graph_planar_correction_enabled_) {
+    throw std::invalid_argument(
+            "pose_graph_solver=ceres_se3 requires full 3D pose graph correction");
+  }
+  if (pose_graph_optimizer_config_.dcs_enabled &&
+    pose_graph_optimizer_config_.dcs_start_stage >=
+    static_cast<int>(pose_graph_optimizer_config_.robust_scale_factors.size()))
+  {
+    throw std::invalid_argument(
+            "pose_graph_ceres_dcs_start_stage must select an existing robust stage");
+  }
+  if (!validPoseGraphOptimizationConfig(pose_graph_optimizer_config_)) {
+    throw std::invalid_argument("pose graph Ceres optimizer configuration is invalid");
+  }
   if (place_recognition_submap_min_consecutive_matches_ < 1) {
     throw std::invalid_argument(
             "place_recognition_submap_min_consecutive_matches must be >= 1");
@@ -2417,6 +2517,12 @@ void ScanToMapIcp::setupRosInterfaces()
   global_map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
     global_map_topic_,
     rclcpp::QoS(1).reliable());
+  export_keyframes_service_ = create_service<std_srvs::srv::Trigger>(
+    "~/export_keyframes",
+    [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+      exportKeyframes(response);
+    });
   terrain_evidence_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
     terrain_evidence_topic_,
     rclcpp::QoS(1).reliable().transient_local());
@@ -4056,8 +4162,10 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
     require_pose_graph_validation);
   if (accepted_place_result) {
     // A strictly verified historical large-loop measurement must reach the
-    // graph unchanged. IMU/ground consistency is represented by graph factors;
-    // re-clamping here would mix the loop target with the still-drifted active pose.
+    // graph unchanged. Accepted sequential keyframes retain the frontend
+    // IMU/ground constraints, and the graph result has a post-solve ground
+    // sequence gate. Re-clamping here would mix the historical loop target
+    // with the still-drifted active pose.
     const Eigen::Isometry3d unconstrained_place_pose = result.map_T_base;
     result.place_recognition_verified_large_loop_measurement_preserved =
       shouldPreserveVerifiedLargeLoopMeasurement(
@@ -4289,6 +4397,30 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
         rejected_place_result.pose_graph_correction_keyframes;
       result.pose_graph_optimization_iterations =
         rejected_place_result.pose_graph_optimization_iterations;
+      result.pose_graph_solver_stages =
+        rejected_place_result.pose_graph_solver_stages;
+      result.pose_graph_solver_successful_steps =
+        rejected_place_result.pose_graph_solver_successful_steps;
+      result.pose_graph_solver_unsuccessful_steps =
+        rejected_place_result.pose_graph_solver_unsuccessful_steps;
+      result.pose_graph_dcs_downweighted_loop_edges =
+        rejected_place_result.pose_graph_dcs_downweighted_loop_edges;
+      result.pose_graph_registration_information_edges =
+        rejected_place_result.pose_graph_registration_information_edges;
+      result.pose_graph_configured_diagonal_information_edges =
+        rejected_place_result.pose_graph_configured_diagonal_information_edges;
+      result.pose_graph_minimum_registration_observable_rank =
+        rejected_place_result.pose_graph_minimum_registration_observable_rank;
+      result.pose_graph_maximum_registration_hessian_condition =
+        rejected_place_result.pose_graph_maximum_registration_hessian_condition;
+      result.pose_graph_minimum_registration_information_gain =
+        rejected_place_result.pose_graph_minimum_registration_information_gain;
+      result.pose_graph_new_loop_registration_information_used =
+        rejected_place_result.pose_graph_new_loop_registration_information_used;
+      result.pose_graph_new_loop_information_status =
+        rejected_place_result.pose_graph_new_loop_information_status;
+      result.pose_graph_new_loop_information_min_gain =
+        rejected_place_result.pose_graph_new_loop_information_min_gain;
       result.pose_graph_optimization_runtime_ms =
         rejected_place_result.pose_graph_optimization_runtime_ms;
       result.pose_graph_iteration_runtime_ms =
@@ -4316,6 +4448,16 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
         rejected_place_result.pose_graph_min_loop_robust_weight;
       result.pose_graph_new_loop_robust_weight =
         rejected_place_result.pose_graph_new_loop_robust_weight;
+      result.pose_graph_dcs_min_scale =
+        rejected_place_result.pose_graph_dcs_min_scale;
+      result.pose_graph_new_loop_dcs_scale =
+        rejected_place_result.pose_graph_new_loop_dcs_scale;
+      result.pose_graph_solver_first_stage_initial_cost =
+        rejected_place_result.pose_graph_solver_first_stage_initial_cost;
+      result.pose_graph_solver_last_stage_final_cost =
+        rejected_place_result.pose_graph_solver_last_stage_final_cost;
+      result.pose_graph_solver_final_gradient_max_norm =
+        rejected_place_result.pose_graph_solver_final_gradient_max_norm;
       result.pose_graph_max_update_translation_m =
         rejected_place_result.pose_graph_max_update_translation_m;
       result.pose_graph_max_update_rotation_deg =
@@ -4568,6 +4710,7 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
 
   if (shouldAddKeyframe(map_T_base_)) {
     if (!result.shock_quarantined) {
+      attachRegistrationInformation(scan_base, local_map, result);
       addKeyframe(
         scan_base,
         mapping_scan_base,
@@ -4575,7 +4718,8 @@ void ScanToMapIcp::processCloud(const SynchronizedCloudSet & cloud_set)
         terrain_sensor_scans,
         stamp,
         gravity_sample,
-        gravity_sample_stale);
+        gravity_sample_stale,
+        &result);
       result.keyframe_added = true;
     } else {
       result.keyframe_quarantined = true;
@@ -4608,6 +4752,11 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
   registration_only_stats = RegistrationOnlyCloudStats{};
   terrain_sensor_scans.clear();
   uncompensated_terrain_sensor_scans.clear();
+  const bool preserve_sensor_views =
+    terrain_config_.enabled || !keyframe_archive_directory_.empty();
+  const double sensor_view_voxel_leaf_m = terrain_config_.enabled ?
+    terrain_config_.classification_voxel_size_m :
+    keyframe_archive_voxel_leaf_m_;
   Eigen::Vector3d primary_origin_base = Eigen::Vector3d::Zero();
   auto primary = convertAndTransformCloud(
     *cloud_set.primary,
@@ -4620,12 +4769,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
   ++merged_cloud_count;
   auto mapping_merged = std::make_shared<CloudT>(*primary);
   auto registration_only_merged = std::make_shared<CloudT>();
-  if (terrain_config_.enabled) {
+  if (preserve_sensor_views) {
     terrain_sensor_scans.push_back(
       TerrainSensorScan{
           downsampleCloud(
             filterCloud(primary),
-            terrain_config_.classification_voxel_size_m),
+            sensor_view_voxel_leaf_m),
           primary_origin_base,
           {},
           {}});
@@ -4635,12 +4784,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
   if (build_uncompensated_hypothesis) {
     uncompensated_mapping_merged = std::make_shared<CloudT>(*primary);
     uncompensated_registration_only_merged = std::make_shared<CloudT>();
-    if (terrain_config_.enabled) {
+    if (preserve_sensor_views) {
       uncompensated_terrain_sensor_scans.push_back(
         TerrainSensorScan{
             downsampleCloud(
               filterCloud(primary),
-              terrain_config_.classification_voxel_size_m),
+              sensor_view_voxel_leaf_m),
             primary_origin_base,
             {},
             {}});
@@ -4690,12 +4839,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
     } else {
       *mapping_merged += *auxiliary;
     }
-    if (!registration_only && terrain_config_.enabled) {
+    if (!registration_only && preserve_sensor_views) {
       terrain_sensor_scans.push_back(
         TerrainSensorScan{
             downsampleCloud(
               filterCloud(auxiliary),
-              terrain_config_.classification_voxel_size_m),
+              sensor_view_voxel_leaf_m),
             auxiliary_origin_base,
             {},
             {}});
@@ -4706,12 +4855,12 @@ ScanToMapIcp::CloudPtr ScanToMapIcp::buildBaseFrameScan(
       } else {
         *uncompensated_mapping_merged += *uncompensated_auxiliary;
       }
-      if (!registration_only && terrain_config_.enabled) {
+      if (!registration_only && preserve_sensor_views) {
         uncompensated_terrain_sensor_scans.push_back(
           TerrainSensorScan{
               downsampleCloud(
                 filterCloud(uncompensated_auxiliary),
-                terrain_config_.classification_voxel_size_m),
+                sensor_view_voxel_leaf_m),
               uncompensated_auxiliary_origin_base,
               {},
               {}});
@@ -6642,6 +6791,14 @@ ScanToMapIcp::RegistrationResult ScanToMapIcp::registerScanToMap(
     result.surfel_hessian_eigenvalues = surfel_result.hessian_eigenvalues;
     result.surfel_weak_rotation_axes = surfel_result.weak_rotation_axes;
     result.surfel_weak_translation_axes = surfel_result.weak_translation_axes;
+    result.registration_information_valid = surfel_result.hessian_valid;
+    result.registration_information_observable_rank = surfel_result.observable_rank;
+    result.registration_information_hessian_condition = surfel_result.hessian_condition;
+    result.registration_information_evaluation_runtime_ms = surfel_result.total_time_ms;
+    result.registration_information_hessian_map_rt = surfel_result.physical_hessian;
+    result.registration_information_pose_map_T_base = surfel_result.target_T_source;
+    result.registration_information_status = surfel_result.hessian_valid ?
+      "voxel_surfel_alignment" : "voxel_surfel_" + surfel_result.reason;
     result.map_T_base = surfel_result.target_T_source;
     result.iterations = surfel_result.iterations;
     result.registration_coarse_iterations = surfel_result.iterations;
@@ -6834,6 +6991,53 @@ ScanToMapIcp::RegistrationResult ScanToMapIcp::registerScanToMap(
   refined_result.iterations =
     result.registration_coarse_iterations + result.registration_refinement_iterations;
   return refined_result;
+}
+
+void ScanToMapIcp::attachRegistrationInformation(
+  const CloudConstPtr & source,
+  const CloudConstPtr & target,
+  RegistrationResult & result) const
+{
+  if (pose_graph_information_mode_ != "registration_observability") {
+    result.registration_information_status = "configured_diagonal_mode";
+    return;
+  }
+  if (result.registration_information_valid &&
+    result.registration_information_hessian_map_rt.allFinite() &&
+    result.registration_information_pose_map_T_base.matrix().isApprox(
+      result.map_T_base.matrix(), 1.0e-9))
+  {
+    // Voxel-surfel already evaluates its final robust Hessian after the last
+    // accepted step. Rebuilding the same target model at every keyframe only
+    // adds callback latency. A pose changed by a later motion constraint still
+    // falls through to an exact fixed-pose re-evaluation below.
+    result.registration_information_evaluation_runtime_ms = 0.0;
+    result.registration_information_status = "reused_registration_linearization";
+    return;
+  }
+  result.registration_information_valid = false;
+  result.registration_information_observable_rank = 0;
+  result.registration_information_hessian_condition = 0.0;
+  result.registration_information_evaluation_runtime_ms = 0.0;
+  result.registration_information_hessian_map_rt.setZero();
+  result.registration_information_pose_map_T_base = result.map_T_base;
+  if (!source || source->empty() || !target || target->empty() ||
+    !result.map_T_base.matrix().allFinite())
+  {
+    result.registration_information_status = "invalid_fixed_pose_inputs";
+    return;
+  }
+
+  const VoxelSurfelRegistration evaluator(surfel_config_);
+  const auto estimate = evaluator.evaluateAtPose(*source, *target, result.map_T_base);
+  result.registration_information_valid = estimate.hessian_valid;
+  result.registration_information_observable_rank = estimate.observable_rank;
+  result.registration_information_hessian_condition = estimate.hessian_condition;
+  result.registration_information_evaluation_runtime_ms = estimate.total_time_ms;
+  result.registration_information_hessian_map_rt = estimate.physical_hessian;
+  result.registration_information_pose_map_T_base = result.map_T_base;
+  result.registration_information_status =
+    "fixed_pose_point_to_plane_" + estimate.reason;
 }
 
 void ScanToMapIcp::evaluateRegistrationOverlap(
@@ -7232,6 +7436,7 @@ void ScanToMapIcp::refinePlaceRecognitionWithMappingCloud(
 
   RegistrationResult refined = registerScanToMap(
     mapping_scan_base, mapping_candidate_map, coarse_pose);
+  attachRegistrationInformation(mapping_scan_base, mapping_candidate_map, refined);
   const RegistrationResult mapping_after = quality_at_pose(
     mapping_scan_base, mapping_candidate_map, refined.map_T_base);
   const RegistrationResult mapping_reverse_after = quality_at_pose(
@@ -7285,6 +7490,18 @@ void ScanToMapIcp::refinePlaceRecognitionWithMappingCloud(
   result.iterations += refined.iterations;
   result.transform_determinant = primary_after.transform_determinant;
   result.transform_orthogonality_error = primary_after.transform_orthogonality_error;
+  result.registration_information_valid = refined.registration_information_valid;
+  result.registration_information_observable_rank =
+    refined.registration_information_observable_rank;
+  result.registration_information_hessian_condition =
+    refined.registration_information_hessian_condition;
+  result.registration_information_evaluation_runtime_ms =
+    refined.registration_information_evaluation_runtime_ms;
+  result.registration_information_hessian_map_rt =
+    refined.registration_information_hessian_map_rt;
+  result.registration_information_pose_map_T_base =
+    refined.registration_information_pose_map_T_base;
+  result.registration_information_status = refined.registration_information_status;
   const Eigen::Isometry3d seed_delta = projectToRigidIsometry(
     candidate_seed_pose.inverse() * result.map_T_base);
   result.correction_translation_m = seed_delta.translation().norm();
@@ -7331,7 +7548,8 @@ void ScanToMapIcp::addKeyframe(
   const std::vector<TerrainSensorScan> & terrain_sensor_scans,
   const rclcpp::Time & stamp,
   const std::optional<GravitySample> & gravity_sample,
-  const bool gravity_sample_stale)
+  const bool gravity_sample_stale,
+  const RegistrationResult * registration_result)
 {
   const int new_keyframe_index = static_cast<int>(keyframes_.size());
   if (new_keyframe_index > 0) {
@@ -7343,23 +7561,60 @@ void ScanToMapIcp::addKeyframe(
     odom_edge.translation_weight = std::max(0.0, pose_graph_odom_translation_weight_);
     odom_edge.vertical_translation_weight = odom_edge.translation_weight;
     odom_edge.rotation_weight = std::max(0.0, pose_graph_odom_rotation_weight_);
+    Vector6d configured_information;
+    configured_information <<
+      odom_edge.translation_weight,
+      odom_edge.translation_weight,
+      odom_edge.vertical_translation_weight,
+      odom_edge.rotation_weight,
+      odom_edge.rotation_weight,
+      odom_edge.rotation_weight;
+    odom_edge.information_matrix = configuredDiagonalInformation(configured_information);
+    if (pose_graph_information_mode_ == "registration_observability" &&
+      registration_result != nullptr && registration_result->registration_information_valid)
+    {
+      const RegistrationInformationResult information =
+        registrationHessianToPoseGraphInformation(
+        registration_result->registration_information_hessian_map_rt,
+        previous.map_T_base,
+        configured_information,
+        pose_graph_information_config_);
+      if (information.valid) {
+        odom_edge.information_matrix = information.information_matrix;
+        odom_edge.registration_information_used = true;
+        odom_edge.registration_observable_rank = information.observable_rank;
+        odom_edge.registration_hessian_condition = information.observable_condition;
+        odom_edge.registration_information_min_gain =
+          information.minimum_information_gain;
+      }
+    }
     odom_edge.loop_closure = false;
     pose_graph_edges_.push_back(odom_edge);
   }
 
   Keyframe keyframe;
+  keyframe.archive_id = next_keyframe_archive_id_++;
   keyframe.stamp = stamp;
   keyframe.map_T_base = map_T_base_;
   keyframe.cloud_base = downsampleCloud(registration_scan_base, map_voxel_leaf_m_);
   keyframe.mapping_cloud_base = downsampleCloud(mapping_scan_base, map_voxel_leaf_m_);
-  if (terrain_config_.enabled) {
+  if (terrain_config_.enabled || !keyframe_archive_directory_.empty()) {
     keyframe.terrain_sensor_scans = terrain_sensor_scans;
+    const double sensor_view_voxel_leaf_m = terrain_config_.enabled ?
+      terrain_config_.classification_voxel_size_m :
+      keyframe_archive_voxel_leaf_m_;
     for (auto & sensor_scan : keyframe.terrain_sensor_scans) {
       sensor_scan.cloud_base = downsampleCloud(
         sensor_scan.cloud_base,
-        terrain_config_.classification_voxel_size_m);
+        sensor_view_voxel_leaf_m);
       sensor_scan.labels.clear();
       sensor_scan.roughness_scores.clear();
+    }
+    if (!keyframe_archive_directory_.empty()) {
+      keyframe.archive_sensor_scans = keyframe.terrain_sensor_scans;
+    }
+    if (!terrain_config_.enabled) {
+      keyframe.terrain_sensor_scans.clear();
     }
   }
   keyframe.cloud_map = filterMapCloud(transformCloud(keyframe.cloud_base, map_T_base_));
@@ -7378,6 +7633,7 @@ void ScanToMapIcp::addKeyframe(
   bool pruned_oldest_keyframe = false;
   if (static_cast<int>(keyframes_.size()) > max_keyframes_) {
     keyframes_.erase(keyframes_.begin());
+    ++pruned_keyframe_count_;
     prunePoseGraphEdgesAfterOldestKeyframeRemoval();
     pruneTerrainTraversalSamplesAfterOldestKeyframeRemoval();
     pruneSubmapsAfterOldestKeyframeRemoval();
@@ -8895,6 +9151,8 @@ bool ScanToMapIcp::tryPlaceRecognition(
     return false;
   }
 
+  attachRegistrationInformation(scan_base, best_candidate_map, best_result);
+
   // Rank candidates using one comparable coarse-registration score, then
   // refine only the selected candidate. Refining inside the candidate loop
   // adds hidden callback latency and mixes backend fitness definitions.
@@ -9103,26 +9361,18 @@ double ScanToMapIcp::poseGraphEdgeSquaredError(
   const PoseGraphEdge & edge,
   const std::vector<Eigen::Isometry3d> & poses) const
 {
-  if (edge.from_index < 0 || edge.to_index < 0 ||
-    edge.from_index >= static_cast<int>(poses.size()) ||
-    edge.to_index >= static_cast<int>(poses.size()))
-  {
-    return std::numeric_limits<double>::infinity();
-  }
+  return poseGraphConstraintChiSquared(poseGraphConstraintFromEdge(edge), poses);
+}
 
-  const auto & from = poses[static_cast<std::size_t>(edge.from_index)];
-  const auto & to = poses[static_cast<std::size_t>(edge.to_index)];
-  const Eigen::Isometry3d expected_to = from * edge.from_T_to;
-  const Eigen::Isometry3d error = expected_to.inverse() * to;
-  const double translation_weight = std::max(0.0, edge.translation_weight);
-  const double vertical_translation_weight =
-    std::max(0.0, edge.vertical_translation_weight);
-  const double rotation_weight = std::max(0.0, edge.rotation_weight);
-  const double rotation_rad = rotationAngleDeg(error.linear()) * M_PI / 180.0;
-  return weightedMapTranslationSquaredError(
-    expected_to.translation(), to.translation(),
-    translation_weight, vertical_translation_weight) +
-         rotation_weight * rotation_rad * rotation_rad;
+PoseGraphConstraint ScanToMapIcp::poseGraphConstraintFromEdge(const PoseGraphEdge & edge)
+{
+  PoseGraphConstraint constraint;
+  constraint.from_index = edge.from_index;
+  constraint.to_index = edge.to_index;
+  constraint.from_T_to = edge.from_T_to;
+  constraint.information_matrix = edge.information_matrix;
+  constraint.loop_closure = edge.loop_closure;
+  return constraint;
 }
 
 double ScanToMapIcp::poseGraphLoopRobustWeight(
@@ -9169,7 +9419,8 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
   const std::vector<Eigen::Isometry3d> & previous_keyframe_poses,
   const bool same_layer_z_constraint,
   const double loop_vertical_translation_weight,
-  const bool distributed_loop_seed)
+  const bool distributed_loop_seed,
+  const RegistrationInformationResult * registration_information)
 {
   const auto optimization_started = std::chrono::steady_clock::now();
   PoseGraphStats stats;
@@ -9205,6 +9456,23 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
   loop_edge.vertical_translation_weight = std::max(
     0.0, loop_vertical_translation_weight);
   loop_edge.rotation_weight = std::max(0.0, pose_graph_loop_rotation_weight_);
+  Vector6d configured_loop_information;
+  configured_loop_information <<
+    loop_edge.translation_weight,
+    loop_edge.translation_weight,
+    loop_edge.vertical_translation_weight,
+    loop_edge.rotation_weight,
+    loop_edge.rotation_weight,
+    loop_edge.rotation_weight;
+  loop_edge.information_matrix = configuredDiagonalInformation(configured_loop_information);
+  if (registration_information != nullptr && registration_information->valid) {
+    loop_edge.information_matrix = registration_information->information_matrix;
+    loop_edge.registration_information_used = true;
+    loop_edge.registration_observable_rank = registration_information->observable_rank;
+    loop_edge.registration_hessian_condition = registration_information->observable_condition;
+    loop_edge.registration_information_min_gain =
+      registration_information->minimum_information_gain;
+  }
   loop_edge.loop_closure = true;
   pose_graph_edges_.push_back(loop_edge);
 
@@ -9214,8 +9482,30 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
       stats.edges = static_cast<int>(pose_graph_edges_.size());
       stats.loop_edges = 0;
       stats.robust_loop_edges_downweighted = 0;
+      stats.registration_information_edges = 0;
+      stats.configured_diagonal_information_edges = 0;
+      stats.minimum_registration_observable_rank = 0;
+      stats.maximum_registration_hessian_condition = 0.0;
+      stats.minimum_registration_information_gain = 1.0;
       stats.min_loop_robust_weight = 1.0;
+      bool have_registration_information = false;
       for (const auto & edge : pose_graph_edges_) {
+        if (edge.registration_information_used) {
+          ++stats.registration_information_edges;
+          stats.maximum_registration_hessian_condition = std::max(
+            stats.maximum_registration_hessian_condition,
+            edge.registration_hessian_condition);
+          stats.minimum_registration_information_gain = std::min(
+            stats.minimum_registration_information_gain,
+            edge.registration_information_min_gain);
+          stats.minimum_registration_observable_rank = have_registration_information ?
+            std::min(
+            stats.minimum_registration_observable_rank,
+            edge.registration_observable_rank) : edge.registration_observable_rank;
+          have_registration_information = true;
+        } else {
+          ++stats.configured_diagonal_information_edges;
+        }
         if (!edge.loop_closure) {
           continue;
         }
@@ -9322,113 +9612,169 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
 
   std::string convergence_reason = "max_iterations";
   const auto iteration_started = std::chrono::steady_clock::now();
-  for (int iteration = 0; iteration < max_iterations; ++iteration) {
-    double iteration_max_translation = 0.0;
-    double iteration_max_rotation = 0.0;
-
+  if (pose_graph_solver_ == "ceres_se3") {
+    std::vector<PoseGraphConstraint> constraints;
+    constraints.reserve(pose_graph_edges_.size());
     for (const auto & edge : pose_graph_edges_) {
-      if (edge.from_index < 0 || edge.to_index < 0 ||
-        edge.from_index >= static_cast<int>(poses.size()) ||
-        edge.to_index >= static_cast<int>(poses.size()))
-      {
-        continue;
-      }
-
-      const int from_index = edge.from_index;
-      const int to_index = edge.to_index;
-      const Eigen::Isometry3d expected_to =
-        poses[static_cast<std::size_t>(from_index)] * edge.from_T_to;
-      Eigen::Isometry3d correction =
-        projectToRigidIsometry(
-        expected_to * poses[static_cast<std::size_t>(to_index)].inverse());
-      if (pose_graph_planar_correction_enabled_) {
-        correction = planarizeCorrection(correction);
-      }
-
-      const double to_share = from_index == 0 ? 1.0 : 0.5;
-      const double from_share = to_index == 0 ? 1.0 : 0.5;
-      const double robust_weight = poseGraphLoopRobustWeight(
-        edge,
-        poseGraphEdgeSquaredError(edge, poses));
-      const double translation_step =
-        std::clamp(
-        base_step * std::max(0.0, edge.translation_weight) * robust_weight,
-        0.0,
-        1.0);
-      const double vertical_translation_step =
-        std::clamp(
-        base_step * std::max(0.0, edge.vertical_translation_weight) * robust_weight,
-        0.0,
-        1.0);
-      const double rotation_step =
-        std::clamp(
-        base_step * std::max(0.0, edge.rotation_weight) * robust_weight,
-        0.0,
-        1.0);
-
-      if (to_index > 0) {
-        Eigen::Isometry3d to_correction = interpolateTransform(
-          correction,
-          translation_step * to_share,
-          rotation_step * to_share);
-        to_correction.translation().z() =
-          correction.translation().z() * vertical_translation_step * to_share;
-        to_correction = limitCorrectionStep(
-          to_correction,
-          max_translation_step,
-          max_rotation_step);
-        iteration_max_translation = std::max(
-          iteration_max_translation,
-          to_correction.translation().norm());
-        iteration_max_rotation = std::max(
-          iteration_max_rotation,
-          rotationAngleDeg(to_correction.linear()));
-        poses[static_cast<std::size_t>(to_index)] =
-          projectToRigidIsometry(
-          to_correction * poses[static_cast<std::size_t>(to_index)]);
-      }
-
-      if (from_index > 0) {
-        const Eigen::Isometry3d inverse_correction = correction.inverse();
-        Eigen::Isometry3d from_correction = interpolateTransform(
-          inverse_correction,
-          translation_step * from_share,
-          rotation_step * from_share);
-        from_correction.translation().z() =
-          inverse_correction.translation().z() *
-          vertical_translation_step * from_share;
-        from_correction = limitCorrectionStep(
-          from_correction,
-          max_translation_step,
-          max_rotation_step);
-        iteration_max_translation = std::max(
-          iteration_max_translation,
-          from_correction.translation().norm());
-        iteration_max_rotation = std::max(
-          iteration_max_rotation,
-          rotationAngleDeg(from_correction.linear()));
-        poses[static_cast<std::size_t>(from_index)] =
-          projectToRigidIsometry(
-          from_correction * poses[static_cast<std::size_t>(from_index)]);
-      }
+      constraints.push_back(poseGraphConstraintFromEdge(edge));
     }
 
+    const std::vector<Eigen::Isometry3d> poses_before_solver = poses;
+    const PoseGraphOptimizationResult optimization =
+      PoseGraphOptimizer(pose_graph_optimizer_config_).optimize(poses, constraints);
+    stats.solver_stages = static_cast<int>(optimization.stages.size());
+    stats.solver_successful_steps = optimization.successful_steps;
+    stats.solver_unsuccessful_steps = optimization.unsuccessful_steps;
+    stats.dcs_downweighted_loop_edges = optimization.dcs_downweighted_loops;
+    stats.dcs_min_scale = optimization.min_dcs_scale;
+    stats.solver_first_stage_initial_cost = optimization.initial_cost;
+    stats.solver_last_stage_final_cost = optimization.final_cost;
+    stats.solver_final_gradient_max_norm = optimization.final_gradient_max_norm;
+    stats.iterations = optimization.total_iterations;
+    convergence_reason = "ceres_" + optimization.termination_type;
+    if (!optimization.success) {
+      reject_new_loop("ceres_" + optimization.failure_reason);
+      stats.residual_after = poseGraphResidual(previous_keyframe_poses, false);
+      stats.robust_objective_after = poseGraphResidual(previous_keyframe_poses, true);
+      return finalize("failed_ceres_se3", convergence_reason);
+    }
+    if (optimization.final_dcs_scales.size() == constraints.size()) {
+      stats.new_loop_dcs_scale = optimization.final_dcs_scales.back();
+    }
+    if (pose_graph_optimizer_config_.dcs_enabled &&
+      stats.new_loop_dcs_scale < min_new_loop_robust_weight)
+    {
+      reject_new_loop("new_loop_dcs_scale");
+      stats.residual_after = poseGraphResidual(previous_keyframe_poses, false);
+      stats.robust_objective_after = poseGraphResidual(previous_keyframe_poses, true);
+      return finalize("rejected_ceres_se3", "dcs_outlier_gate");
+    }
+
+    poses = optimization.poses;
+    for (std::size_t index = 0; index < poses.size(); ++index) {
+      stats.max_update_translation_m = std::max(
+        stats.max_update_translation_m,
+        (poses[index].translation() - poses_before_solver[index].translation()).norm());
+      const Eigen::Matrix3d rotation_delta =
+        poses_before_solver[index].linear().transpose() * poses[index].linear();
+      stats.max_update_rotation_deg = std::max(
+        stats.max_update_rotation_deg,
+        rotationAngleDeg(rotation_delta));
+    }
     const double objective = poseGraphResidual(poses, true);
-    if (objective < best_objective) {
+    if (std::isfinite(objective) && objective < best_objective) {
       best_objective = objective;
       best_poses = poses;
     }
-    stats.max_update_translation_m = std::max(
-      stats.max_update_translation_m,
-      iteration_max_translation);
-    stats.max_update_rotation_deg = std::max(
-      stats.max_update_rotation_deg,
-      iteration_max_rotation);
-    stats.iterations = iteration + 1;
+  } else {
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+      double iteration_max_translation = 0.0;
+      double iteration_max_rotation = 0.0;
 
-    if (iteration_max_translation < 1.0e-4 && iteration_max_rotation < 1.0e-3) {
-      convergence_reason = "step_tolerance";
-      break;
+      for (const auto & edge : pose_graph_edges_) {
+        if (edge.from_index < 0 || edge.to_index < 0 ||
+          edge.from_index >= static_cast<int>(poses.size()) ||
+          edge.to_index >= static_cast<int>(poses.size()))
+        {
+          continue;
+        }
+
+        const int from_index = edge.from_index;
+        const int to_index = edge.to_index;
+        const Eigen::Isometry3d expected_to =
+          poses[static_cast<std::size_t>(from_index)] * edge.from_T_to;
+        Eigen::Isometry3d correction =
+          projectToRigidIsometry(
+          expected_to * poses[static_cast<std::size_t>(to_index)].inverse());
+        if (pose_graph_planar_correction_enabled_) {
+          correction = planarizeCorrection(correction);
+        }
+
+        const double to_share = from_index == 0 ? 1.0 : 0.5;
+        const double from_share = to_index == 0 ? 1.0 : 0.5;
+        const double robust_weight = poseGraphLoopRobustWeight(
+          edge,
+          poseGraphEdgeSquaredError(edge, poses));
+        const double translation_step =
+          std::clamp(
+          base_step * std::max(0.0, edge.translation_weight) * robust_weight,
+          0.0,
+          1.0);
+        const double vertical_translation_step =
+          std::clamp(
+          base_step * std::max(0.0, edge.vertical_translation_weight) * robust_weight,
+          0.0,
+          1.0);
+        const double rotation_step =
+          std::clamp(
+          base_step * std::max(0.0, edge.rotation_weight) * robust_weight,
+          0.0,
+          1.0);
+
+        if (to_index > 0) {
+          Eigen::Isometry3d to_correction = interpolateTransform(
+            correction,
+            translation_step * to_share,
+            rotation_step * to_share);
+          to_correction.translation().z() =
+            correction.translation().z() * vertical_translation_step * to_share;
+          to_correction = limitCorrectionStep(
+            to_correction,
+            max_translation_step,
+            max_rotation_step);
+          iteration_max_translation = std::max(
+            iteration_max_translation,
+            to_correction.translation().norm());
+          iteration_max_rotation = std::max(
+            iteration_max_rotation,
+            rotationAngleDeg(to_correction.linear()));
+          poses[static_cast<std::size_t>(to_index)] =
+            projectToRigidIsometry(
+            to_correction * poses[static_cast<std::size_t>(to_index)]);
+        }
+
+        if (from_index > 0) {
+          const Eigen::Isometry3d inverse_correction = correction.inverse();
+          Eigen::Isometry3d from_correction = interpolateTransform(
+            inverse_correction,
+            translation_step * from_share,
+            rotation_step * from_share);
+          from_correction.translation().z() =
+            inverse_correction.translation().z() *
+            vertical_translation_step * from_share;
+          from_correction = limitCorrectionStep(
+            from_correction,
+            max_translation_step,
+            max_rotation_step);
+          iteration_max_translation = std::max(
+            iteration_max_translation,
+            from_correction.translation().norm());
+          iteration_max_rotation = std::max(
+            iteration_max_rotation,
+            rotationAngleDeg(from_correction.linear()));
+          poses[static_cast<std::size_t>(from_index)] =
+            projectToRigidIsometry(
+            from_correction * poses[static_cast<std::size_t>(from_index)]);
+        }
+      }
+
+      const double objective = poseGraphResidual(poses, true);
+      if (objective < best_objective) {
+        best_objective = objective;
+        best_poses = poses;
+      }
+      stats.max_update_translation_m = std::max(
+        stats.max_update_translation_m,
+        iteration_max_translation);
+      stats.max_update_rotation_deg = std::max(
+        stats.max_update_rotation_deg,
+        iteration_max_rotation);
+      stats.iterations = iteration + 1;
+
+      if (iteration_max_translation < 1.0e-4 && iteration_max_rotation < 1.0e-3) {
+        convergence_reason = "step_tolerance";
+        break;
+      }
     }
   }
   stats.iteration_runtime_ms = std::chrono::duration<double, std::milli>(
@@ -9483,7 +9829,10 @@ ScanToMapIcp::PoseGraphStats ScanToMapIcp::optimizePoseGraphWithLoop(
   }
 
   stats.applied = true;
-  return finalize("accepted", convergence_reason);
+  return finalize(
+    pose_graph_solver_ == "ceres_se3" ?
+    "accepted_ceres_se3" : "accepted_legacy_relaxation",
+    convergence_reason);
 }
 
 void ScanToMapIcp::updatePathFromKeyframeCorrections(
@@ -9544,12 +9893,14 @@ void ScanToMapIcp::applyPoseGraphCorrection(
 {
   result.pose_graph_correction_applied = false;
   result.pose_graph_new_loop_rejected = false;
+  result.pose_graph_new_loop_registration_information_used = false;
   result.pose_graph_minimum_interval_override_applied = false;
   result.pose_graph_duplicate_submap_pair_override_applied = false;
   result.pose_graph_minimum_interval_elapsed_s = -1.0;
   result.pose_graph_minimum_interval_status = "not_evaluated";
   result.pose_graph_duplicate_submap_pair_previous_edges = 0;
   result.pose_graph_duplicate_submap_pair_status = "not_evaluated";
+  result.pose_graph_new_loop_information_status = "not_evaluated";
   result.pose_graph_same_layer_z_constraint_evaluated = false;
   result.pose_graph_same_layer_z_constraint_applied = false;
   result.pose_graph_same_layer_z_seed_applied = false;
@@ -9582,6 +9933,16 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_constraint_inlier_rmse_m = 0.0;
   result.pose_graph_constraint_target_coverage_ratio = 0.0;
   result.pose_graph_optimization_iterations = 0;
+  result.pose_graph_solver_stages = 0;
+  result.pose_graph_solver_successful_steps = 0;
+  result.pose_graph_solver_unsuccessful_steps = 0;
+  result.pose_graph_dcs_downweighted_loop_edges = 0;
+  result.pose_graph_registration_information_edges = 0;
+  result.pose_graph_configured_diagonal_information_edges = 0;
+  result.pose_graph_minimum_registration_observable_rank = 0;
+  result.pose_graph_maximum_registration_hessian_condition = 0.0;
+  result.pose_graph_minimum_registration_information_gain = 1.0;
+  result.pose_graph_new_loop_information_min_gain = 1.0;
   result.pose_graph_optimization_runtime_ms = 0.0;
   result.pose_graph_iteration_runtime_ms = 0.0;
   result.pose_graph_mean_iteration_runtime_ms = 0.0;
@@ -9603,6 +9964,11 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_robust_objective_before_ground_sequence = 0.0;
   result.pose_graph_min_loop_robust_weight = 1.0;
   result.pose_graph_new_loop_robust_weight = 1.0;
+  result.pose_graph_dcs_min_scale = 1.0;
+  result.pose_graph_new_loop_dcs_scale = 1.0;
+  result.pose_graph_solver_first_stage_initial_cost = 0.0;
+  result.pose_graph_solver_last_stage_final_cost = 0.0;
+  result.pose_graph_solver_final_gradient_max_norm = 0.0;
   result.pose_graph_max_update_translation_m = 0.0;
   result.pose_graph_max_update_rotation_deg = 0.0;
 
@@ -9837,16 +10203,66 @@ void ScanToMapIcp::applyPoseGraphCorrection(
   result.pose_graph_same_layer_z_translation_weight =
     result.pose_graph_same_layer_z_constraint_applied ?
     loop_vertical_translation_weight : 0.0;
-  const Eigen::Isometry3d prospective_loop_error =
-    projectToRigidIsometry(graph_target_loop_pose.inverse() * keyframes_.back().map_T_base);
-  const double prospective_loop_rotation_rad =
-    rotationAngleDeg(prospective_loop_error.linear()) * M_PI / 180.0;
-  const double prospective_loop_residual =
-    weightedMapTranslationSquaredError(
-    graph_target_loop_pose.translation(), keyframes_.back().map_T_base.translation(),
-    pose_graph_loop_translation_weight_, loop_vertical_translation_weight) +
-    std::max(0.0, pose_graph_loop_rotation_weight_) *
-    prospective_loop_rotation_rad * prospective_loop_rotation_rad;
+  Vector6d configured_loop_information;
+  configured_loop_information <<
+    std::max(0.0, pose_graph_loop_translation_weight_),
+    std::max(0.0, pose_graph_loop_translation_weight_),
+    std::max(0.0, loop_vertical_translation_weight),
+    std::max(0.0, pose_graph_loop_rotation_weight_),
+    std::max(0.0, pose_graph_loop_rotation_weight_),
+    std::max(0.0, pose_graph_loop_rotation_weight_);
+  RegistrationInformationResult loop_registration_information;
+  const Eigen::Isometry3d latest_keyframe_T_current =
+    keyframes_.back().map_T_base.inverse() * reference_pose;
+  const Eigen::Isometry3d information_registration_pose = projectToRigidIsometry(
+    graph_target_loop_pose * latest_keyframe_T_current);
+  const bool information_pose_matches_loop_measurement =
+    result.registration_information_pose_map_T_base.matrix().isApprox(
+    information_registration_pose.matrix(), 1.0e-6);
+  if (pose_graph_information_mode_ == "registration_observability" &&
+    result.registration_information_valid && information_pose_matches_loop_measurement)
+  {
+    const Eigen::Vector3d endpoint_to_registration_origin_map =
+      graph_target_loop_pose.linear() * latest_keyframe_T_current.translation();
+    loop_registration_information = registrationHessianToPoseGraphInformation(
+      result.registration_information_hessian_map_rt,
+      keyframes_[static_cast<std::size_t>(graph_anchor_index)].map_T_base,
+      configured_loop_information,
+      pose_graph_information_config_,
+      endpoint_to_registration_origin_map);
+  }
+  if (pose_graph_information_mode_ != "registration_observability") {
+    result.pose_graph_new_loop_information_status = "configured_diagonal_mode";
+  } else if (!result.registration_information_valid) {
+    result.pose_graph_new_loop_information_status = "registration_information_invalid";
+  } else if (!information_pose_matches_loop_measurement) {
+    result.pose_graph_new_loop_information_status = "linearization_pose_mismatch";
+  } else if (!loop_registration_information.valid) {
+    result.pose_graph_new_loop_information_status =
+      "conversion_" + loop_registration_information.failure_reason;
+  } else {
+    result.pose_graph_new_loop_information_status = "registration_observability";
+  }
+  result.pose_graph_new_loop_registration_information_used =
+    loop_registration_information.valid;
+  result.pose_graph_new_loop_information_min_gain = loop_registration_information.valid ?
+    loop_registration_information.minimum_information_gain : 1.0;
+  PoseGraphConstraint prospective_loop_constraint;
+  prospective_loop_constraint.from_index = 0;
+  prospective_loop_constraint.to_index = 1;
+  prospective_loop_constraint.from_T_to =
+    keyframes_[static_cast<std::size_t>(graph_anchor_index)].map_T_base.inverse() *
+    graph_target_loop_pose;
+  prospective_loop_constraint.information_matrix = loop_registration_information.valid ?
+    loop_registration_information.information_matrix :
+    configuredDiagonalInformation(configured_loop_information);
+  prospective_loop_constraint.loop_closure = true;
+  const std::vector<Eigen::Isometry3d> prospective_loop_poses{
+    keyframes_[static_cast<std::size_t>(graph_anchor_index)].map_T_base,
+    keyframes_.back().map_T_base};
+  const double prospective_loop_residual = poseGraphConstraintChiSquared(
+    prospective_loop_constraint,
+    prospective_loop_poses);
   result.pose_graph_residual_before = prospective_loop_residual;
   const double max_loop_residual_before = std::max(0.0, pose_graph_max_loop_residual_before_);
   if (max_loop_residual_before > 0.0 &&
@@ -9869,8 +10285,22 @@ void ScanToMapIcp::applyPoseGraphCorrection(
     previous_keyframe_poses,
     result.pose_graph_same_layer_z_constraint_applied,
     loop_vertical_translation_weight,
-    result.pose_graph_high_confidence_large_loop);
+    result.pose_graph_high_confidence_large_loop,
+    loop_registration_information.valid ? &loop_registration_information : nullptr);
   result.pose_graph_optimization_iterations = stats.iterations;
+  result.pose_graph_solver_stages = stats.solver_stages;
+  result.pose_graph_solver_successful_steps = stats.solver_successful_steps;
+  result.pose_graph_solver_unsuccessful_steps = stats.solver_unsuccessful_steps;
+  result.pose_graph_dcs_downweighted_loop_edges = stats.dcs_downweighted_loop_edges;
+  result.pose_graph_registration_information_edges = stats.registration_information_edges;
+  result.pose_graph_configured_diagonal_information_edges =
+    stats.configured_diagonal_information_edges;
+  result.pose_graph_minimum_registration_observable_rank =
+    stats.minimum_registration_observable_rank;
+  result.pose_graph_maximum_registration_hessian_condition =
+    stats.maximum_registration_hessian_condition;
+  result.pose_graph_minimum_registration_information_gain =
+    stats.minimum_registration_information_gain;
   result.pose_graph_edges = stats.edges;
   result.pose_graph_loop_edges = stats.loop_edges;
   result.pose_graph_robust_loop_edges_downweighted = stats.robust_loop_edges_downweighted;
@@ -9884,6 +10314,14 @@ void ScanToMapIcp::applyPoseGraphCorrection(
     stats.robust_objective_before_ground_sequence;
   result.pose_graph_min_loop_robust_weight = stats.min_loop_robust_weight;
   result.pose_graph_new_loop_robust_weight = stats.new_loop_robust_weight;
+  result.pose_graph_dcs_min_scale = stats.dcs_min_scale;
+  result.pose_graph_new_loop_dcs_scale = stats.new_loop_dcs_scale;
+  result.pose_graph_solver_first_stage_initial_cost =
+    stats.solver_first_stage_initial_cost;
+  result.pose_graph_solver_last_stage_final_cost =
+    stats.solver_last_stage_final_cost;
+  result.pose_graph_solver_final_gradient_max_norm =
+    stats.solver_final_gradient_max_norm;
   result.pose_graph_max_update_translation_m = stats.max_update_translation_m;
   result.pose_graph_max_update_rotation_deg = stats.max_update_rotation_deg;
   result.pose_graph_same_layer_z_seed_applied = stats.same_layer_z_seed_applied;
@@ -9966,16 +10404,60 @@ void ScanToMapIcp::rebuildGlobalMap()
       refreshKeyframeCloudMap(index);
     }
     const auto & keyframe = keyframes_[index];
-    if (!keyframe.mapping_cloud_map || keyframe.mapping_cloud_map->empty()) {
-      continue;
+    if (keyframe.mapping_cloud_map) {
+      *merged += *keyframe.mapping_cloud_map;
     }
-    *merged += *(keyframe.mapping_cloud_map);
   }
-
   global_map_ = downsampleCloud(merged, map_voxel_leaf_m_);
   rebuildSubmaps();
   rebuildTerrainEvidenceMap();
   latest_local_map_ = buildLocalMap(map_T_base_);
+}
+
+void ScanToMapIcp::exportKeyframes(
+  const std::shared_ptr<std_srvs::srv::Trigger::Response> & response)
+{
+  if (keyframe_archive_directory_.empty()) {
+    response->success = false;
+    response->message = "Set keyframe_archive_directory before mapping to retain sensor views.";
+    return;
+  }
+  KeyframeArchive archive;
+  {
+    // Capture poses and immutable base clouds from one graph revision; perform I/O unlocked.
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    archive.map_frame = map_frame_;
+    archive.base_frame = base_frame_;
+    archive.map_z_filter_enabled = map_z_filter_enabled_;
+    archive.map_z_min_m = std::min(map_z_filter_min_m_, map_z_filter_max_m_);
+    archive.map_z_max_m = std::max(map_z_filter_min_m_, map_z_filter_max_m_);
+    archive.pruned_keyframes = pruned_keyframe_count_;
+    archive.keyframes.reserve(keyframes_.size());
+    for (const auto & keyframe : keyframes_) {
+      ArchivedKeyframe entry;
+      entry.id = keyframe.archive_id;
+      entry.stamp_ns = keyframe.stamp.nanoseconds();
+      entry.map_T_base = keyframe.map_T_base;
+      for (const auto & scan : keyframe.archive_sensor_scans) {
+        if (scan.cloud_base && !scan.cloud_base->empty()) {
+          entry.scans.push_back(ArchivedSensorScan{scan.cloud_base, scan.sensor_origin_base});
+        }
+      }
+      archive.keyframes.push_back(std::move(entry));
+    }
+  }
+  try {
+    writeKeyframeArchive(keyframe_archive_directory_, archive);
+    response->success = true;
+    response->message = "Exported " + std::to_string(archive.keyframes.size()) +
+      " retained keyframes to " + keyframe_archive_directory_ +
+      " (pruned=" + std::to_string(archive.pruned_keyframes) + ")";
+    RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+  } catch (const std::exception & error) {
+    response->success = false;
+    response->message = error.what();
+    RCLCPP_ERROR(get_logger(), "Keyframe export failed: %s", error.what());
+  }
 }
 
 void ScanToMapIcp::publishState(
@@ -10505,6 +10987,19 @@ void ScanToMapIcp::publishDiagnostics(
     "surfel_hessian_eigenvalues",
     surfel_eigenvalues.str());
   add_value("surfel_hessian_condition", toString(result.surfel_hessian_condition));
+  add_value(
+    "registration_information_valid",
+    result.registration_information_valid ? "true" : "false");
+  add_value("registration_information_status", result.registration_information_status);
+  add_value(
+    "registration_information_observable_rank",
+    toString(result.registration_information_observable_rank));
+  add_value(
+    "registration_information_hessian_condition",
+    toString(result.registration_information_hessian_condition));
+  add_value(
+    "registration_information_evaluation_runtime_ms",
+    toString(result.registration_information_evaluation_runtime_ms));
   add_value(
     "surfel_weak_rotation_x",
     toString(result.surfel_weak_rotation_axes.x()));
@@ -11144,6 +11639,17 @@ void ScanToMapIcp::publishDiagnostics(
   add_value(
     "pose_graph_correction",
     pose_graph_correction_enabled_ ? "enabled" : "disabled");
+  add_value("pose_graph_solver", pose_graph_solver_);
+  add_value("pose_graph_information_mode", pose_graph_information_mode_);
+  add_value(
+    "pose_graph_information_relative_eigen_threshold",
+    toString(pose_graph_information_config_.relative_eigen_threshold));
+  add_value(
+    "pose_graph_information_strong_eigenvalue_ratio",
+    toString(pose_graph_information_config_.strong_eigenvalue_ratio));
+  add_value(
+    "pose_graph_information_weak_ratio",
+    toString(pose_graph_information_config_.weak_information_ratio));
   add_value(
     "pose_graph_planar_correction",
     pose_graph_planar_correction_enabled_ ? "enabled" : "disabled");
@@ -11184,6 +11690,22 @@ void ScanToMapIcp::publishDiagnostics(
     "pose_graph_minimum_interval_override_single_floor_z_weight_multiplier",
     toString(pose_graph_minimum_interval_override_single_floor_z_weight_multiplier_));
   add_value("pose_graph_loop_cauchy_scale", toString(pose_graph_loop_cauchy_scale_));
+  add_value(
+    "pose_graph_ceres_robust_stage_count",
+    toString(pose_graph_optimizer_config_.robust_scale_factors.size()));
+  add_value(
+    "pose_graph_ceres_max_iterations_per_stage",
+    toString(pose_graph_optimizer_config_.max_iterations_per_stage));
+  add_value(
+    "pose_graph_ceres_dcs",
+    pose_graph_optimizer_config_.dcs_enabled ? "enabled" : "disabled");
+  add_value(
+    "pose_graph_ceres_dcs_start_stage",
+    toString(pose_graph_optimizer_config_.dcs_start_stage));
+  add_value("pose_graph_ceres_dcs_phi", toString(pose_graph_optimizer_config_.dcs_phi));
+  add_value(
+    "pose_graph_ceres_dcs_min_scale",
+    toString(pose_graph_optimizer_config_.dcs_min_scale));
   add_value(
     "pose_graph_min_new_loop_robust_weight",
     toString(pose_graph_min_new_loop_robust_weight_));
@@ -11342,6 +11864,53 @@ void ScanToMapIcp::publishDiagnostics(
   add_value(
     "pose_graph_optimization_iterations",
     toString(result.pose_graph_optimization_iterations));
+  add_value("pose_graph_solver_stages", toString(result.pose_graph_solver_stages));
+  add_value(
+    "pose_graph_solver_successful_steps",
+    toString(result.pose_graph_solver_successful_steps));
+  add_value(
+    "pose_graph_solver_unsuccessful_steps",
+    toString(result.pose_graph_solver_unsuccessful_steps));
+  add_value(
+    "pose_graph_dcs_downweighted_loop_edges",
+    toString(result.pose_graph_dcs_downweighted_loop_edges));
+  add_value(
+    "pose_graph_registration_information_edges",
+    toString(result.pose_graph_registration_information_edges));
+  add_value(
+    "pose_graph_configured_diagonal_information_edges",
+    toString(result.pose_graph_configured_diagonal_information_edges));
+  add_value(
+    "pose_graph_minimum_registration_observable_rank",
+    toString(result.pose_graph_minimum_registration_observable_rank));
+  add_value(
+    "pose_graph_maximum_registration_hessian_condition",
+    toString(result.pose_graph_maximum_registration_hessian_condition));
+  add_value(
+    "pose_graph_minimum_registration_information_gain",
+    toString(result.pose_graph_minimum_registration_information_gain));
+  add_value(
+    "pose_graph_new_loop_registration_information_used",
+    result.pose_graph_new_loop_registration_information_used ? "true" : "false");
+  add_value(
+    "pose_graph_new_loop_information_status",
+    result.pose_graph_new_loop_information_status);
+  add_value(
+    "pose_graph_new_loop_information_min_gain",
+    toString(result.pose_graph_new_loop_information_min_gain));
+  add_value("pose_graph_dcs_min_scale", toString(result.pose_graph_dcs_min_scale));
+  add_value(
+    "pose_graph_new_loop_dcs_scale",
+    toString(result.pose_graph_new_loop_dcs_scale));
+  add_value(
+    "pose_graph_solver_first_stage_initial_cost",
+    toString(result.pose_graph_solver_first_stage_initial_cost));
+  add_value(
+    "pose_graph_solver_last_stage_final_cost",
+    toString(result.pose_graph_solver_last_stage_final_cost));
+  add_value(
+    "pose_graph_solver_final_gradient_max_norm",
+    toString(result.pose_graph_solver_final_gradient_max_norm));
   add_value(
     "pose_graph_optimization_runtime_ms",
     toString(result.pose_graph_optimization_runtime_ms));
@@ -11486,6 +12055,12 @@ void ScanToMapIcp::publishDiagnostics(
     "active_submap_accumulated_travel_m",
     have_active_submap ? toString(submaps_.back().accumulated_travel_m) : "0");
   add_value("global_map_points", toString(global_map_ ? global_map_->size() : 0));
+  add_value("map_cleanup", "external_postprocess");
+  add_value("global_map_semantics", "unfiltered_mapping_cloud");
+  add_value("keyframe_archive_directory", keyframe_archive_directory_);
+  add_value("keyframe_archive_retention",
+    keyframe_archive_directory_.empty() ? "disabled" : "enabled");
+  add_value("keyframe_archive_pruned_keyframes", toString(pruned_keyframe_count_));
   const TerrainAccumulatorStats terrain_stats = terrain_accumulator_.stats();
   const TerrainPreviewStats terrain_preview_stats = terrain_preview_tracker_.stats();
   add_value("terrain_evidence", terrain_config_.enabled ? "enabled" : "disabled");

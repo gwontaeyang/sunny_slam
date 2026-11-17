@@ -8,12 +8,15 @@ from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
     ExecuteProcess,
+    IncludeLaunchDescription,
     LogInfo,
+    OpaqueFunction,
     RegisterEventHandler,
     TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.events import matches_action
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     AndSubstitution,
     LaunchConfiguration,
@@ -24,6 +27,14 @@ from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
+
+
+def validate_tf_ownership(context):
+    truthy = {"true", "1", "yes", "on"}
+    if all(LaunchConfiguration(name).perform(context).lower() in truthy
+           for name in ("start_slam", "use_static_map_odom")):
+        raise RuntimeError("SLAM and a static map->odom publisher cannot run together")
+    return []
 
 
 def generate_launch_description():
@@ -38,9 +49,12 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     start_slam = LaunchConfiguration("start_slam")
     scan_topic = LaunchConfiguration("scan_topic")
+    base_frame = LaunchConfiguration("base_frame")
     use_static_map_odom = LaunchConfiguration("use_static_map_odom")
     bag_play_rate = LaunchConfiguration("bag_play_rate")
     params_file = LaunchConfiguration("params_file")
+    use_custom = LaunchConfiguration("use_roughness_innovation_slam_toolbox")
+    standard_slam = AndSubstitution(start_slam, NotSubstitution(use_custom))
 
     declare_bag_file = DeclareLaunchArgument(
         "bag_file",
@@ -62,6 +76,11 @@ def generate_launch_description():
         default_value="/scan_laserscan",
         description="LaserScan topic used by slam_toolbox.",
     )
+    declare_base_frame = DeclareLaunchArgument(
+        "base_frame",
+        default_value="base_link",
+        description="Robot base frame used by slam_toolbox.",
+    )
     declare_use_static_map_odom = DeclareLaunchArgument(
         "use_static_map_odom",
         default_value="false",
@@ -77,6 +96,38 @@ def generate_launch_description():
         default_value=default_params_file,
         description="Path to slam_toolbox params YAML file.",
     )
+    declare_use_custom = DeclareLaunchArgument(
+        "use_roughness_innovation_slam_toolbox",
+        default_value="true",
+        description="Use custom 2D SLAM; set false for stock Toolbox.",
+    )
+
+    custom_slam = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(slam_2d_bringup_dir, "launch", "slam.launch.py")
+        ),
+        launch_arguments={
+            "params_file": params_file,
+            "use_sim_time": use_sim_time,
+            "scan_topic": scan_topic,
+            "base_frame": base_frame,
+            "use_roughness_innovation_slam_toolbox": "true",
+        }.items(),
+        condition=IfCondition(AndSubstitution(start_slam, use_custom)),
+    )
+    # The custom frontend self-configures and has no lifecycle transition event.
+    custom_bag_play = ExecuteProcess(
+        cmd=[
+            "python3",
+            os.path.join(slam_2d_bringup_dir, "scripts", "play_after_slam_ready.py"),
+            "--bag", bag_file, "--rate", bag_play_rate,
+        ],
+        output="screen",
+        condition=IfCondition(AndSubstitution(
+            AndSubstitution(start_slam, use_custom),
+            PythonExpression(['"', bag_file, '" != ""']),
+        )),
+    )
 
     slam_toolbox_node = LifecycleNode(
         package="slam_toolbox",
@@ -89,9 +140,10 @@ def generate_launch_description():
             {
                 "use_sim_time": use_sim_time,
                 "scan_topic": scan_topic,
+                "base_frame": base_frame,
             },
         ],
-        condition=IfCondition(start_slam),
+        condition=IfCondition(standard_slam),
     )
 
     configure_event = EmitEvent(
@@ -99,7 +151,7 @@ def generate_launch_description():
             lifecycle_node_matcher=matches_action(slam_toolbox_node),
             transition_id=Transition.TRANSITION_CONFIGURE,
         ),
-        condition=IfCondition(start_slam),
+        condition=IfCondition(standard_slam),
     )
 
     activate_event = RegisterEventHandler(
@@ -117,7 +169,7 @@ def generate_launch_description():
                 ),
             ],
         ),
-        condition=IfCondition(start_slam),
+        condition=IfCondition(standard_slam),
     )
 
     bag_play_after_slam = RegisterEventHandler(
@@ -149,7 +201,7 @@ def generate_launch_description():
         ),
         condition=IfCondition(
             AndSubstitution(
-                start_slam,
+                standard_slam,
                 PythonExpression(['"', bag_file, '" != ""']),
             )
         ),
@@ -181,9 +233,14 @@ def generate_launch_description():
             declare_use_sim_time,
             declare_start_slam,
             declare_scan_topic,
+            declare_base_frame,
             declare_use_static_map_odom,
             declare_bag_play_rate,
             declare_params_file,
+            declare_use_custom,
+            OpaqueFunction(function=validate_tf_ownership),
+            custom_slam,
+            custom_bag_play,
             slam_toolbox_node,
             static_map_odom_tf,
             configure_event,

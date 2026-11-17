@@ -1,0 +1,155 @@
+slam_toolbox:
+  ros__parameters:
+    enable_roughness_innovation_gate: true
+    roughness_innovation_mode: observe
+    roughness_imu_topic: /imu/data
+    roughness_scan_qos_reliable: false
+    roughness_scan_qos_depth: 5
+
+    # SLAM-owned LaserScan conditioning is experimental and remains opt-in.
+    enable_roughness_scan_conditioning: false
+    roughness_scan_conditioning_mode: observe
+    roughness_scan_conditioning_use_nearest_imu_sample: true
+    roughness_scan_conditioning_max_scan_imu_dt_s: 0.20
+    roughness_scan_conditioning_hold_duration_s: 0.10
+    roughness_scan_conditioning_hard_hold_duration_s: 0.0
+    roughness_scan_conditioning_hard_score_gate: 3.0
+    roughness_scan_conditioning_throttle_min_publish_period_s: 0.50
+    roughness_scan_conditioning_throttle_drop_hard: true
+    roughness_scan_conditioning_max_continuous_drop_duration_s: 0.0
+    roughness_scan_conditioning_stabilize_max_source_age_s: 0.75
+    roughness_scan_conditioning_stabilize_max_event_duration_s: 0.50
+    roughness_scan_conditioning_stabilize_min_publish_period_s: 0.10
+    roughness_scan_conditioning_stabilize_max_translation_m: 0.20
+    roughness_scan_conditioning_stabilize_max_yaw_rad: 0.15
+    roughness_scan_conditioning_stabilize_max_roll_pitch_rad: 0.05
+    roughness_scan_conditioning_stabilize_min_cached_valid_ratio: 0.20
+    roughness_scan_conditioning_stabilize_min_output_valid_ratio: 0.15
+    roughness_scan_conditioning_stabilize_min_output_valid_beams: 20
+    roughness_scan_conditioning_stabilize_fallback_mode: drop
+    roughness_scan_conditioning_residual_max_source_age_s: 0.75
+    roughness_scan_conditioning_residual_max_translation_m: 0.20
+    roughness_scan_conditioning_residual_max_yaw_rad: 0.15
+    roughness_scan_conditioning_residual_max_roll_pitch_rad: 0.05
+    roughness_scan_conditioning_residual_threshold_m: 0.08
+    roughness_scan_conditioning_residual_neighbor_bins: 1
+    roughness_scan_conditioning_residual_min_cached_valid_ratio: 0.20
+    roughness_scan_conditioning_residual_min_overlap_ratio: 0.35
+    roughness_scan_conditioning_residual_min_overlap_beams: 100
+    roughness_scan_conditioning_residual_min_output_valid_ratio: 0.20
+    roughness_scan_conditioning_residual_min_output_valid_beams: 100
+    roughness_scan_conditioning_residual_direction: closer
+    roughness_scan_conditioning_residual_max_removed_ratio: 0.03
+    roughness_scan_conditioning_residual_promote_filtered_reference: false
+    roughness_scan_conditioning_residual_fallback_mode: observe
+    roughness_scan_conditioning_quarantine_recovery_scan_count: 5
+    # This is the post-shouldProcessScan pose-graph candidate interval, not the
+    # raw LaserScan period. Field bags are near 0.52 s at p95 while moving.
+    roughness_scan_conditioning_quarantine_max_scan_gap_s: 0.75
+    roughness_scan_conditioning_quarantine_min_stable_duration_s: 0.16
+    roughness_scan_conditioning_quarantine_fault_after_s: 3.0
+    roughness_scan_conditioning_quarantine_fail_open_on_imu_fault: true
+    roughness_scan_conditioning_quarantine_min_valid_ratio: 0.20
+
+    roughness_window_before_s: 0.10
+    roughness_window_after_s: 0.10
+    roughness_pending_timeout_s: 0.50
+    roughness_imu_buffer_duration_s: 2.0
+    roughness_imu_qos_reliable: false
+    roughness_imu_qos_depth: 2000
+    roughness_imu_epoch_reset_threshold_s: 1.0
+    roughness_max_pending_scans: 2000
+
+    roughness_score_gate: 2.75
+    roughness_min_rough_samples: 1
+    roughness_min_rough_duration_s: 0.0
+    roughness_tilt_threshold_deg: 2.0
+    roughness_gyro_xy_threshold_rad_s: 0.05
+    roughness_accel_norm_deviation_threshold_m_s2: 0.35
+    roughness_tilt_rate_threshold_deg_s: 5.0
+    roughness_accel_norm_rate_threshold_m_s3: 80.0
+
+    roughness_translation_innovation_gate_m: 0.015
+    roughness_yaw_innovation_gate_deg: 1.0
+    # Observe adaptive roughness memory and exact candidate quality without
+    # changing the graph. legacy_fixed_memory is an explicit ablation only.
+    roughness_constraint_mode: adaptive_memory_observe
+    # Observe exact Karto loop chains and pair accepted callbacks with graph
+    # edges. This instrumentation never changes the graph.
+    roughness_enable_loop_closure_candidate_observer: true
+    # Learn the normal near-chain rotation distribution online. In observe
+    # mode this only logs proposed actions; adaptive_quality_aware is required
+    # before a response threshold can be changed.
+    roughness_enable_rotation_consistency_guard: true
+    roughness_rotation_history_size: 64
+    roughness_rotation_minimum_history_batches: 8
+    roughness_rotation_outlier_sigma: 6.0
+    roughness_rotation_extreme_yaw_sigma: 12.0
+    roughness_rotation_yaw_scale_floor_deg: 0.4
+    roughness_rotation_translation_scale_floor_m: 0.03
+    roughness_rotation_weighted_disagreement_scale_floor: 0.25
+    roughness_rotation_chain_overlap_trigger: 0.75
+    roughness_rotation_maximum_repeat_state_gap: 2
+    roughness_rotation_stable_recovery_batches: 3
+    roughness_enable_near_chain_gate: true
+    roughness_near_chain_recovery_duration_s: 2.0
+    roughness_near_chain_loop_closing_cooldown_s: 0.0
+    roughness_near_chain_min_rough_samples: 1
+    roughness_near_chain_gated_min_response: 1.1
+    roughness_disable_loop_closing_during_near_chain_gate: false
+    roughness_enable_spatial_memory_gate: false
+    roughness_spatial_memory_use_pose_graph_anchors: false
+    roughness_spatial_memory_radius_m: 0.6
+    roughness_spatial_memory_min_revisit_separation_s: 20.0
+    roughness_spatial_memory_min_heading_delta_deg: 126.0
+    roughness_spatial_memory_merge_radius_m: 0.10
+    roughness_spatial_memory_max_zones: 200
+    roughness_enable_spatial_passage_hysteresis: false
+    roughness_spatial_passage_radius_m: 0.55
+    roughness_spatial_passage_max_age_s: 3.5
+
+    roughness_enable_post_confirmation: true
+    roughness_post_confirmation_max_age_s: 2.0
+    roughness_post_confirmation_min_base_scans: 8
+    roughness_post_confirmation_max_base_scans: 10
+    roughness_post_confirmation_min_response: 0.30
+    roughness_post_confirmation_min_response_gain: 0.05
+    roughness_post_confirmation_min_covariance_improvement_ratio: 1.5
+    roughness_post_confirmation_translation_disagreement_gate_m: 0.03
+    roughness_post_confirmation_yaw_disagreement_gate_deg: 1.0
+
+    # Roughness retrieves top-K candidates, then validates stable pre/post
+    # anchors with odom-seeded bidirectional LaserScan matching. The checked-in
+    # profile remains shadow-only; controlled replays may override mode to soft.
+    roughness_enable_place_recognition_observer: true
+    roughness_enable_place_scan_match_observer: true
+    roughness_place_evaluate_both_directions: false
+    roughness_place_enable_reference_chain_observer: false
+    roughness_place_reference_chain_scan_count: 5
+    roughness_place_reference_chain_max_distance_m: 1.0
+    roughness_place_reference_chain_max_state_gap: 5
+    roughness_place_reference_chain_max_time_gap_s: 5.0
+    roughness_place_descriptor_bins: 16
+    roughness_place_max_observations_per_event: 512
+    roughness_place_max_events: 200
+    roughness_place_candidate_top_k: 5
+    roughness_place_min_revisit_separation_s: 20.0
+    roughness_place_min_state_separation: 20
+    roughness_place_constraint_mode: observe
+    roughness_place_constraint_anchor_strategy: best_single
+    roughness_place_min_fine_response: 0.30
+    roughness_place_max_proposal_disagreement_translation_m: 0.30
+    roughness_place_max_proposal_disagreement_yaw_deg: 5.0
+    roughness_place_max_fine_xy_covariance_m2: 0.04
+    roughness_place_max_fine_yaw_covariance_deg2: 25.0
+    roughness_place_max_bidirectional_translation_error_m: 0.10
+    roughness_place_max_bidirectional_yaw_error_deg: 2.0
+    roughness_place_max_pair_alignment_translation_error_m: 0.50
+    roughness_place_max_pair_alignment_yaw_error_deg: 3.0
+    roughness_place_constraint_pair_covariance_scale: 1.0
+    roughness_place_constraint_group_covariance_scale: 1.0
+    roughness_place_constraint_xy_variance_floor_m2: 0.01
+    roughness_place_constraint_yaw_variance_floor_deg2: 1.0
+    roughness_diagnostics_period_s: 10.0
+
+    roughness_experimental_reject_scan_stamps_ns: ""
